@@ -5,17 +5,26 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use holochain_moq_mesh::{DeliveryMode, MeshTransport, Role, TrackName, TransportSession};
+use holochain_moq_mesh::{
+    DeliveryMode, MeshTransport, RaceId, Role, Source, TrackName, TrackPath, TransportSession,
+};
 use holochain_moq_mesh_iroh::{IrohConfig, IrohMeshTransport, Reach};
 
 const N: u64 = 200;
+
+fn path(agent: &str, track: &str) -> TrackPath {
+    TrackPath::new(
+        RaceId::new("r1").unwrap(),
+        Source::Agent(agent.into()),
+        TrackName::new(track).unwrap(),
+    )
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_link_carries_both_modes_both_ways() -> Result<()> {
     let a = IrohMeshTransport::bind(IrohConfig::new(Reach::DirectOnly), "agentA").await?;
     let b = IrohMeshTransport::bind(IrohConfig::new(Reach::DirectOnly), "agentB").await?;
-    let state = TrackName::new("state")?;
-    let events = TrackName::new("events")?;
+    let (state, events) = (path("agentA", "state"), path("agentB", "events"));
     // Tracks exist before any session: published to every future session.
     let mut a_state = a.publish(&state, DeliveryMode::Latest)?;
     let mut b_events = b.publish(&events, DeliveryMode::ReliableOrdered)?;
@@ -40,22 +49,28 @@ async fn one_link_carries_both_modes_both_ways() -> Result<()> {
     );
     let (sa, sb) = (sa?, sb?);
 
-    let mut b_reads_state = sb.subscribe(&state, DeliveryMode::Latest).await?;
-    let mut a_reads_events = sa.subscribe(&events, DeliveryMode::ReliableOrdered).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut b_reads_state = sb.subscribe(&state, DeliveryMode::Latest)?;
+    let mut a_reads_events = sa.subscribe(&events, DeliveryMode::ReliableOrdered)?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     for i in 0..N {
         a_state.send(Bytes::from(i.to_be_bytes().to_vec()))?;
-        b_events.send(Bytes::from(i.to_be_bytes().to_vec()))?;
+        assert_eq!(
+            b_events.send(Bytes::from(i.to_be_bytes().to_vec()))?,
+            i,
+            "reliable seq"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
-    // Reliable: every object, in order.
+    // Reliable: every object, in order, with its sequence number.
     for i in 0..N {
-        let got = tokio::time::timeout(Duration::from_secs(5), a_reads_events.recv()).await??;
+        let got = tokio::time::timeout(Duration::from_secs(5), a_reads_events.recv())
+            .await??
+            .unwrap();
         assert_eq!(
-            got,
-            Some(Bytes::from(i.to_be_bytes().to_vec())),
+            (got.seq, got.payload),
+            (i, Bytes::from(i.to_be_bytes().to_vec())),
             "reliable object {i}"
         );
     }
@@ -65,7 +80,7 @@ async fn one_link_carries_both_modes_both_ways() -> Result<()> {
         let got = tokio::time::timeout(Duration::from_secs(5), b_reads_state.recv())
             .await??
             .unwrap();
-        let v = u64::from_be_bytes(got[..].try_into()?);
+        let v = u64::from_be_bytes(got.payload[..].try_into()?);
         assert!(
             last.is_none_or(|l| v > l),
             "latest went backwards: {last:?} -> {v}"
@@ -75,8 +90,17 @@ async fn one_link_carries_both_modes_both_ways() -> Result<()> {
             break;
         }
     }
-    println!("info A->B: {:?}", sa.link_info());
-    assert!(sa.link_info().kind.is_some());
+    let info = sa.link_info();
+    println!(
+        "info A->B: {info:?}\nlatest stats: {:?}",
+        b_reads_state.stats()
+    );
+    assert!(
+        info.kind.is_some()
+            && info
+                .counters
+                .is_some_and(|c| c.tx_bytes > 0 && c.rx_bytes > 0)
+    );
 
     sa.close();
     tokio::time::timeout(Duration::from_secs(5), sb.closed()).await?;

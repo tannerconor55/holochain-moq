@@ -45,7 +45,9 @@ use tokio::task::AbortHandle;
 use crate::error::MeshError;
 use crate::transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 use crate::types::{
-    ConnectionKind, DeliveryMode, MeshEvent, PeerBinding, PeerStatus, RejectReason, Role, TrackName,
+    ConnectionKind, DeliveryMode, MeshEvent, MeshObject, PeerBinding, PeerStatus, PublisherStats,
+    RaceId, RejectReason, Role, Source, SubscriptionStats, TrackName, TrackPath,
+    LATEST_MAX_PAYLOAD, RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD,
 };
 
 /// Who opens the connection for a pair.
@@ -97,6 +99,7 @@ struct Peer<S> {
 struct Inner<T: MeshTransport> {
     transport: T,
     local: AgentPubKeyB64,
+    race: RaceId,
     config: MeshConfig,
     roster: HashMap<AgentPubKeyB64, T::Addr>,
     by_node: HashMap<T::NodeId, AgentPubKeyB64>,
@@ -117,16 +120,23 @@ impl<T: MeshTransport> MeshSession<T> {
     /// Validate the roster, start accepting, and dial the peers this side
     /// must dial. Returns the session and an event receiver subscribed before
     /// anything could happen, so no `PeerJoined` is missed.
+    ///
+    /// One mesh carries one race: every track it publishes or subscribes to
+    /// is `race/<race>/...`. This side's own broadcast is announced at once,
+    /// so peers may subscribe to its tracks before they are published.
     pub fn start(
         transport: T,
         local: AgentPubKeyB64,
+        race: RaceId,
         roster: Vec<PeerBinding<T::Addr>>,
         config: MeshConfig,
     ) -> Result<(Self, broadcast::Receiver<MeshEvent>), MeshError> {
+        Source::check_agent(&local)?;
         let local_node = transport.local_node();
         let mut by_agent = HashMap::new();
         let mut by_node = HashMap::new();
         for b in roster {
+            Source::check_agent(&b.agent)?;
             if b.agent == local {
                 return Err(MeshError::InvalidRoster(
                     "the local agent is in its own roster".into(),
@@ -152,10 +162,17 @@ impl<T: MeshTransport> MeshSession<T> {
                 )));
             }
         }
+        let own = TrackPath::new(
+            race.clone(),
+            Source::Agent(local.clone()),
+            TrackName::new("x")?,
+        );
+        transport.announce(&own.broadcast())?;
         let (events, rx) = broadcast::channel(config.event_capacity);
         let inner = Arc::new(Inner {
             transport,
             local,
+            race,
             config,
             roster: by_agent,
             by_node,
@@ -191,20 +208,77 @@ impl<T: MeshTransport> MeshSession<T> {
         self.inner.events.subscribe()
     }
 
-    /// Start publishing one of this peer's tracks to every session.
+    pub fn race(&self) -> &RaceId {
+        &self.inner.race
+    }
+
+    /// Publish `race/<race>/<own agent>/<track>` to every peer.
     pub fn publish(
         &self,
         track: TrackName,
         mode: DeliveryMode,
     ) -> Result<TrackPublisher, MeshError> {
-        let sink = self.inner.transport.publish(&track, mode)?;
-        Ok(TrackPublisher { track, sink })
+        self.publish_source(Source::Agent(self.inner.local.clone()), track, mode)
     }
 
-    /// Subscribe to `track` published by `peer`, over the session with that peer.
-    pub async fn subscribe(
+    /// Publish `race/<race>/ai-<slot>/<track>` (the host's AI karts).
+    /// Which peer may do this is not checked yet (WP8).
+    pub fn publish_ai(
+        &self,
+        slot: u8,
+        track: TrackName,
+        mode: DeliveryMode,
+    ) -> Result<TrackPublisher, MeshError> {
+        let source = Source::Ai(slot);
+        let path = TrackPath::new(self.inner.race.clone(), source, track);
+        self.inner.transport.announce(&path.broadcast())?;
+        self.publish_path(path, mode)
+    }
+
+    fn publish_source(
+        &self,
+        source: Source,
+        track: TrackName,
+        mode: DeliveryMode,
+    ) -> Result<TrackPublisher, MeshError> {
+        if source != Source::Agent(self.inner.local.clone()) {
+            return Err(MeshError::NotOwnSource);
+        }
+        self.publish_path(TrackPath::new(self.inner.race.clone(), source, track), mode)
+    }
+
+    fn publish_path(
+        &self,
+        path: TrackPath,
+        mode: DeliveryMode,
+    ) -> Result<TrackPublisher, MeshError> {
+        let sink = self.inner.transport.publish(&path, mode)?;
+        Ok(TrackPublisher {
+            path,
+            mode,
+            sink,
+            objects: 0,
+            bytes: 0,
+        })
+    }
+
+    /// Subscribe to `race/<race>/<peer>/<track>` over the session with `peer`.
+    /// The track need not exist yet; the peer must be connected.
+    pub fn subscribe(
         &self,
         peer: &str,
+        track: TrackName,
+        mode: DeliveryMode,
+    ) -> Result<TrackSubscription, MeshError> {
+        self.subscribe_source(peer, Source::Agent(peer.to_string()), track, mode)
+    }
+
+    /// Subscribe to `race/<race>/<source>/<track>` as served by `peer` (e.g.
+    /// `Source::Ai(3)` from the host).
+    pub fn subscribe_source(
+        &self,
+        peer: &str,
+        source: Source,
         track: TrackName,
         mode: DeliveryMode,
     ) -> Result<TrackSubscription, MeshError> {
@@ -219,10 +293,11 @@ impl<T: MeshTransport> MeshSession<T> {
             .get(peer)
             .map(|p| p.session.clone())
             .ok_or_else(|| MeshError::NotConnected(peer.to_string()))?;
-        let source = session.subscribe(&track, mode).await?;
+        let path = TrackPath::new(self.inner.race.clone(), source, track);
+        let source = session.subscribe(&path, mode)?;
         Ok(TrackSubscription {
             peer: peer.to_string(),
-            track,
+            path,
             source,
         })
     }
@@ -491,26 +566,60 @@ impl<T: MeshTransport> Inner<T> {
     }
 }
 
-/// Publishes one local track to every peer.
+/// Publishes one local track to every peer. Enforces the [`DeliveryMode`]
+/// bounds before anything reaches the transport.
 pub struct TrackPublisher {
-    track: TrackName,
+    path: TrackPath,
+    mode: DeliveryMode,
     sink: Box<dyn TrackSink>,
+    objects: u64,
+    bytes: u64,
 }
 
 impl TrackPublisher {
-    pub fn track(&self) -> &TrackName {
-        &self.track
+    pub fn path(&self) -> &TrackPath {
+        &self.path
     }
 
-    pub fn send(&mut self, payload: impl Into<Bytes>) -> Result<(), MeshError> {
-        Ok(self.sink.send(payload.into())?)
+    /// Send one object; returns its transport sequence number.
+    pub fn send(&mut self, payload: impl Into<Bytes>) -> Result<u64, MeshError> {
+        let payload = payload.into();
+        let max = match self.mode {
+            DeliveryMode::Latest => LATEST_MAX_PAYLOAD,
+            DeliveryMode::ReliableOrdered => RELIABLE_MAX_PAYLOAD,
+        };
+        if payload.len() > max {
+            return Err(MeshError::PayloadTooLarge {
+                len: payload.len(),
+                max,
+                mode: self.mode,
+            });
+        }
+        if self.mode == DeliveryMode::ReliableOrdered
+            && (self.objects >= RELIABLE_MAX_OBJECTS
+                || self.bytes + payload.len() as u64 > RELIABLE_MAX_BYTES)
+        {
+            return Err(MeshError::HistoryFull {
+                objects: self.objects,
+                bytes: self.bytes,
+            });
+        }
+        let len = payload.len() as u64;
+        let seq = self.sink.send(payload)?;
+        self.objects += 1;
+        self.bytes += len;
+        Ok(seq)
+    }
+
+    pub fn stats(&self) -> PublisherStats {
+        self.sink.stats()
     }
 }
 
 /// One peer's track, as received over the session with that peer.
 pub struct TrackSubscription {
     peer: AgentPubKeyB64,
-    track: TrackName,
+    path: TrackPath,
     source: Box<dyn TrackSource>,
 }
 
@@ -519,18 +628,22 @@ impl TrackSubscription {
         &self.peer
     }
 
-    pub fn track(&self) -> &TrackName {
-        &self.track
+    pub fn path(&self) -> &TrackPath {
+        &self.path
     }
 
-    /// `Ok(Some)` next object; `Ok(None)` the publisher ended the track;
-    /// `Err` the session with that peer is gone.
+    /// `Ok(Some)` next payload; `Ok(None)` the publisher ended the track;
+    /// `Err` the session with that peer is gone (or reliable history was lost).
     pub async fn recv(&mut self) -> Result<Option<Bytes>, MeshError> {
+        Ok(self.source.recv().await?.map(|o| o.payload))
+    }
+
+    /// Like [`Self::recv`], with the transport sequence number.
+    pub async fn recv_object(&mut self) -> Result<Option<MeshObject>, MeshError> {
         Ok(self.source.recv().await?)
     }
 
-    /// Objects discarded locally because this reader fell behind (`Latest`).
-    pub fn dropped(&self) -> u64 {
-        self.source.dropped()
+    pub fn stats(&self) -> SubscriptionStats {
+        self.source.stats()
     }
 }

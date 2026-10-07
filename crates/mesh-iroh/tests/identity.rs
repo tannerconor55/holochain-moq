@@ -88,8 +88,13 @@ async fn the_directory_binding_is_accepted_and_unused_during_delivery() -> Resul
                 addr: iroh_addr_for(&peer.endpoints)?,
             });
         }
-        let (mesh, events) =
-            MeshSession::start(b.transport, b.agent.clone(), roster, MeshConfig::default())?;
+        let (mesh, events) = MeshSession::start(
+            b.transport,
+            b.agent.clone(),
+            race(),
+            roster,
+            MeshConfig::default(),
+        )?;
         nodes.push(Node {
             agent: b.agent,
             mesh,
@@ -109,8 +114,7 @@ async fn the_directory_binding_is_accepted_and_unused_during_delivery() -> Resul
         for m in nodes.iter().filter(|m| m.agent != n.agent) {
             subs.push(
                 n.mesh
-                    .subscribe(&m.agent, t.clone(), DeliveryMode::ReliableOrdered)
-                    .await?,
+                    .subscribe(&m.agent, t.clone(), DeliveryMode::ReliableOrdered)?,
             );
         }
     }
@@ -157,6 +161,7 @@ async fn only_the_bound_endpoint_id_is_accepted_for_an_agent() -> Result<()> {
     let (b_mesh, mut b_events) = MeshSession::start(
         bt,
         b.clone(),
+        race(),
         vec![PeerBinding {
             agent: a.clone(),
             addr: x_addr,
@@ -169,10 +174,12 @@ async fn only_the_bound_endpoint_id_is_accepted_for_an_agent() -> Result<()> {
             addr: b_addr.clone(),
         }]
     };
-    let (y_mesh, mut y_events) = MeshSession::start(y, a.clone(), to_b(), MeshConfig::default())?;
+    let (y_mesh, mut y_events) =
+        MeshSession::start(y, a.clone(), race(), to_b(), MeshConfig::default())?;
     // Y dials first, so a "first come" rule would have let it in.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let (x_mesh, _x_events) = MeshSession::start(x, a.clone(), to_b(), MeshConfig::default())?;
+    let (x_mesh, _x_events) =
+        MeshSession::start(x, a.clone(), race(), to_b(), MeshConfig::default())?;
 
     assert!(b_mesh.wait_for_peers(1, Duration::from_secs(10)).await);
     assert!(x_mesh.wait_for_peers(1, Duration::from_secs(10)).await);
@@ -201,9 +208,7 @@ async fn only_the_bound_endpoint_id_is_accepted_for_an_agent() -> Result<()> {
     // What B receives from "agent-00" really comes from X.
     let t = TrackName::new("who")?;
     let mut xp = x_mesh.publish(t.clone(), DeliveryMode::ReliableOrdered)?;
-    let mut sub = b_mesh
-        .subscribe(&a, t, DeliveryMode::ReliableOrdered)
-        .await?;
+    let mut sub = b_mesh.subscribe(&a, t, DeliveryMode::ReliableOrdered)?;
     xp.send("I am X")?;
     let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())
         .await??
@@ -234,6 +239,7 @@ async fn dialing_an_agent_at_the_wrong_endpoint_id_fails() -> Result<()> {
     let (a_mesh, mut a_events) = MeshSession::start(
         at,
         agent(0),
+        race(),
         vec![PeerBinding {
             agent: agent(1),
             addr: wrong,
@@ -243,6 +249,7 @@ async fn dialing_an_agent_at_the_wrong_endpoint_id_fails() -> Result<()> {
     let (b_mesh, _b) = MeshSession::start(
         bt,
         agent(1),
+        race(),
         vec![PeerBinding {
             agent: agent(0),
             addr: a_addr,
@@ -302,10 +309,19 @@ async fn an_authenticated_non_member_is_refused_before_any_session() -> Result<(
     );
     if let Ok(s) = session {
         use holochain_moq_mesh::TransportSession;
-        let sub = s
-            .subscribe(&TrackName::new("state")?, DeliveryMode::Latest)
-            .await;
-        assert!(sub.is_err(), "no track reachable over a refused link");
+        let mut sub = s.subscribe(
+            &holochain_moq_mesh::TrackPath::new(
+                race(),
+                holochain_moq_mesh::Source::Agent(nodes[0].agent.clone()),
+                TrackName::new("state")?,
+            ),
+            DeliveryMode::Latest,
+        )?;
+        let r = tokio::time::timeout(Duration::from_secs(3), sub.recv()).await;
+        assert!(
+            !matches!(r, Ok(Ok(Some(_)))),
+            "no track reachable over a refused link: {r:?}"
+        );
     }
     assert_eq!(
         nodes[0].mesh.connection_count(),

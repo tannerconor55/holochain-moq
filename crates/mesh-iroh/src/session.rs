@@ -1,25 +1,21 @@
-use std::time::Duration;
-
-use anyhow::{bail, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use holochain_moq_mesh::{
-    ConnectionKind, DeliveryMode, LinkInfo, Role, TrackName, TrackSource, TransportSession,
+    ConnectionKind, DeliveryMode, LinkCounters, LinkInfo, Role, TrackPath, TrackSource,
+    TransportSession,
 };
 use iroh::endpoint::{Connection, VarInt};
 use moq_net::origin;
 
 use crate::{spawn_driver, track, versions};
 
-/// How long a subscribe waits for the remote's broadcast to be announced.
-const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// One MoQ session (both roles) over one iroh connection.
 pub struct IrohMoqSession {
     conn: Connection,
     session: moq_net::Session,
-    /// The remote's broadcasts arrive here; only `remote_agent` is ever read.
+    /// The remote's broadcasts arrive here; a subscription reads only the one
+    /// broadcast its path names.
     subscribe: origin::Producer,
-    remote_agent: String,
 }
 
 impl IrohMoqSession {
@@ -61,11 +57,11 @@ impl IrohMoqSession {
             }
         };
         spawn_driver(driver);
+        let _ = remote_agent;
         Ok(Self {
             conn,
             session,
             subscribe,
-            remote_agent: remote_agent.to_string(),
         })
     }
 
@@ -78,54 +74,63 @@ impl IrohMoqSession {
 impl TransportSession for IrohMoqSession {
     fn link_info(&self) -> LinkInfo {
         let paths = self.conn.paths();
-        match paths.iter().find(|p| p.is_selected()) {
-            Some(p) => LinkInfo {
-                kind: Some(if p.is_relay() {
+        let selected = paths.iter().find(|p| p.is_selected());
+        let st = self.conn.stats();
+        LinkInfo {
+            kind: selected.as_ref().map(|p| {
+                if p.is_relay() {
                     ConnectionKind::Relayed
                 } else {
                     ConnectionKind::Direct
-                }),
-                rtt_ms: Some(p.rtt().as_secs_f64() * 1000.0),
-            },
-            None => LinkInfo {
-                kind: None,
-                rtt_ms: None,
-            },
+                }
+            }),
+            rtt_ms: selected.as_ref().map(|p| p.rtt().as_secs_f64() * 1000.0),
+            counters: Some(LinkCounters {
+                tx_bytes: st.udp_tx.bytes,
+                rx_bytes: st.udp_rx.bytes,
+                tx_packets: st.udp_tx.datagrams,
+                rx_packets: st.udp_rx.datagrams,
+                lost_packets: st.lost_packets,
+            }),
         }
     }
 
-    async fn subscribe(
+    fn subscribe(
         &self,
-        track: &TrackName,
+        path: &TrackPath,
         mode: DeliveryMode,
     ) -> anyhow::Result<Box<dyn TrackSource>> {
-        // Only the remote's own broadcast is consulted, so a peer can never
-        // serve tracks under another agent's name over its session.
+        // Only the broadcast named by `path` is read from this session's
+        // subscribe origin, so a peer can never serve another session's
+        // sources, and no track is reachable outside the race.
         let consumer = self.subscribe.consume();
-        let mut announced = consumer.announced();
-        let prefix = loop {
-            let update = tokio::time::timeout(ANNOUNCE_TIMEOUT, announced.next())
+        let broadcast = path.broadcast();
+        let track = path.track.as_str().to_string();
+        let open = async move {
+            let mut announced = consumer.announced();
+            let prefix = loop {
+                let update = announced
+                    .next()
+                    .await
+                    .context("session ended before the broadcast was announced")?;
+                if update.kind.is_active() && update.prefix.as_str() == broadcast {
+                    break update.prefix;
+                }
+            };
+            let bc = consumer
+                .request_broadcast(&prefix)
                 .await
-                .with_context(|| format!("{} never announced its broadcast", self.remote_agent))?
-                .context("session ended before the remote announced")?;
-            if update.kind.is_active() && update.prefix.as_str() == self.remote_agent {
-                break update.prefix;
-            }
+                .context("request broadcast")?;
+            // Resolves when the publisher accepts (immediately, or when it
+            // creates a track that was requested early).
+            let consumer = bc.track(&track).with_context(|| format!("track {track}"))?;
+            let sub = consumer
+                .subscribe(track::subscription(mode))
+                .await
+                .with_context(|| format!("subscribe {broadcast}/{track}"))?;
+            Ok((consumer, sub))
         };
-        let broadcast = consumer
-            .request_broadcast(&prefix)
-            .await
-            .context("request broadcast")?;
-        let sub = broadcast
-            .track(track.as_str())
-            .with_context(|| format!("track {track}"))?
-            .subscribe(None)
-            .await
-            .with_context(|| format!("subscribe {}/{track}", self.remote_agent))?;
-        if self.conn.close_reason().is_some() {
-            bail!("session closed while subscribing");
-        }
-        Ok(Box::new(track::spawn_reader(sub, mode)))
+        Ok(Box::new(track::spawn_reader(open, mode)))
     }
 
     async fn closed(&self) {

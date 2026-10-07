@@ -11,6 +11,10 @@
 //! - Nothing published by [`MeshTransport::publish`] is reachable over a link
 //!   until [`MeshTransport::establish`] has been called on it, so a link
 //!   refused with [`MeshTransport::reject`] never sees a track.
+//! - The [`crate::DeliveryMode`] contract (ordering, loss, the bounds in
+//!   `types.rs`) holds for every track it carries.
+//! - A subscription to a track that does not exist yet is accepted and starts
+//!   delivering once the publisher creates it.
 
 use std::fmt;
 use std::hash::Hash;
@@ -18,7 +22,10 @@ use std::hash::Hash;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::types::{DeliveryMode, LinkInfo, RejectReason, Role, TrackName};
+use crate::types::{
+    DeliveryMode, LinkInfo, MeshObject, PublisherStats, RejectReason, Role, SubscriptionStats,
+    TrackPath,
+};
 
 #[async_trait]
 pub trait MeshTransport: Send + Sync + 'static {
@@ -49,8 +56,13 @@ pub trait MeshTransport: Send + Sync + 'static {
     /// Refuse a link before any session or track exists on it.
     fn reject(&self, link: Self::Link, reason: RejectReason);
 
+    /// Make `broadcast` (`race/<race>/<source>`) known to every current and
+    /// future session before any of its tracks exists, so peers can subscribe
+    /// to its tracks early. Idempotent.
+    fn announce(&self, broadcast: &str) -> anyhow::Result<()>;
+
     /// Start publishing a local track, visible to every current and future session.
-    fn publish(&self, track: &TrackName, mode: DeliveryMode) -> anyhow::Result<Box<dyn TrackSink>>;
+    fn publish(&self, path: &TrackPath, mode: DeliveryMode) -> anyhow::Result<Box<dyn TrackSink>>;
 
     async fn close(&self);
 }
@@ -58,10 +70,11 @@ pub trait MeshTransport: Send + Sync + 'static {
 #[async_trait]
 pub trait TransportSession: Send + Sync {
     fn link_info(&self) -> LinkInfo;
-    /// Subscribe to `track` published by this session's remote peer.
-    async fn subscribe(
+    /// Subscribe to `path` as published by this session's remote peer. Returns
+    /// at once; a track that does not exist yet starts delivering when it does.
+    fn subscribe(
         &self,
-        track: &TrackName,
+        path: &TrackPath,
         mode: DeliveryMode,
     ) -> anyhow::Result<Box<dyn TrackSource>>;
     /// Resolves once the session is gone, for whatever reason.
@@ -71,15 +84,16 @@ pub trait TransportSession: Send + Sync {
 
 /// Writes one local track.
 pub trait TrackSink: Send {
-    fn send(&mut self, payload: Bytes) -> anyhow::Result<()>;
+    /// Returns the object's transport sequence number.
+    fn send(&mut self, payload: Bytes) -> anyhow::Result<u64>;
+    fn stats(&self) -> PublisherStats;
 }
 
 /// Reads one remote track.
 #[async_trait]
 pub trait TrackSource: Send {
     /// `Ok(Some)` next object, `Ok(None)` the publisher ended the track,
-    /// `Err` the session was lost.
-    async fn recv(&mut self) -> anyhow::Result<Option<Bytes>>;
-    /// Objects discarded locally because the reader fell behind (`Latest` only).
-    fn dropped(&self) -> u64;
+    /// `Err` the session was lost (or, `ReliableOrdered`, history was lost).
+    async fn recv(&mut self) -> anyhow::Result<Option<MeshObject>>;
+    fn stats(&self) -> SubscriptionStats;
 }

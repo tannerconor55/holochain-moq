@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use holochain_moq_mesh::{MeshConfig, MeshEvent, MeshSession, PeerBinding};
+use holochain_moq_mesh::{MeshConfig, MeshEvent, MeshSession, PeerBinding, RaceId};
 use holochain_moq_mesh_iroh::{EndpointAddr, IrohConfig, IrohMeshTransport, Reach, RelayMap};
 use tokio::sync::broadcast;
 
@@ -18,6 +18,11 @@ pub fn init_tracing() {
         )
         .with_test_writer()
         .try_init();
+}
+
+/// The race every test mesh carries.
+pub fn race() -> RaceId {
+    RaceId::new("test-race").unwrap()
 }
 
 /// Agent keys for tests: fixed, sortable, one MoQ path segment each.
@@ -88,7 +93,7 @@ pub fn start(bound: Vec<Bound>, config: MeshConfig) -> Result<Vec<Node>> {
             .cloned()
             .collect();
         let (mesh, events) =
-            MeshSession::start(b.transport, b.agent.clone(), roster, config.clone())?;
+            MeshSession::start(b.transport, b.agent.clone(), race(), roster, config.clone())?;
         nodes.push(Node {
             agent: b.agent,
             mesh,

@@ -20,20 +20,22 @@ pub mod record;
 mod session;
 mod track;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use holochain_moq_mesh::{DeliveryMode, MeshTransport, RejectReason, Role, TrackName, TrackSink};
+use holochain_moq_mesh::{DeliveryMode, MeshTransport, RejectReason, Role, TrackPath, TrackSink};
 use iroh::endpoint::{presets, Connection, QuicTransportConfig, VarInt};
 use moq_net::{broadcast, origin, Version, Versions};
 
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 pub use record::{iroh_addr, iroh_addr_for, iroh_endpoint};
 pub use session::IrohMoqSession;
-pub use track::{LATEST_QUEUE, RELIABLE_QUEUE};
+pub use track::{
+    LatestCarrier, LATEST_STREAM_RETENTION, RELIABLE_GROUP_OBJECTS, RELIABLE_MAX_PENDING_GROUPS,
+};
 
 /// QUIC idle timeout: a peer that vanishes without closing is released after
 /// this long (same 10 s as the existing quinn stack).
@@ -66,6 +68,8 @@ pub struct IrohConfig {
     pub reach: Reach,
     /// The endpoint's long-lived key. `None` generates a fresh one.
     pub secret_key: Option<SecretKey>,
+    /// How `Latest` objects are carried (datagrams by default).
+    pub latest_carrier: LatestCarrier,
     /// **Tests only** (feature `test-utils`): trust any certificate presented
     /// by a *relay* server (the in-process test relay is self-signed). Peer
     /// authentication by EndpointId is unaffected.
@@ -78,6 +82,7 @@ impl IrohConfig {
         Self {
             reach,
             secret_key: None,
+            latest_carrier: LatestCarrier::default(),
             #[cfg(feature = "test-utils")]
             insecure_relay_tls: false,
         }
@@ -86,9 +91,12 @@ impl IrohConfig {
 
 pub struct IrohMeshTransport {
     endpoint: Endpoint,
-    local_agent: String,
+    latest_carrier: LatestCarrier,
     publish: origin::Producer,
-    broadcast: broadcast::Producer,
+    /// `race/<race>/<source>` -> the broadcast and a live `Dynamic` handle.
+    /// Holding the `Dynamic` makes moq-net queue a peer's SUBSCRIBE for a
+    /// track that does not exist yet; `create_track` then fulfils it.
+    broadcasts: Mutex<HashMap<String, (broadcast::Producer, broadcast::Dynamic)>>,
     tracks: Mutex<HashSet<String>>,
 }
 
@@ -99,18 +107,11 @@ pub(crate) fn spawn_driver<D: moq_net::time::Driver + Send + 'static>(driver: D)
     });
 }
 
-/// MoQ broadcast paths are `/`-separated; an agent key must be one segment.
-fn check_agent(agent: &str) -> anyhow::Result<()> {
-    if agent.is_empty() || agent.contains('/') {
-        bail!("agent {agent:?} cannot be used as a MoQ broadcast name");
-    }
-    Ok(())
-}
-
 impl IrohMeshTransport {
-    /// Bind an iroh endpoint for `local_agent` and start its publish origin.
+    /// Bind an iroh endpoint and start its publish origin. `local_agent` is
+    /// only checked here; broadcasts are created per race by the mesh.
     pub async fn bind(config: IrohConfig, local_agent: &str) -> anyhow::Result<Self> {
-        check_agent(local_agent)?;
+        holochain_moq_mesh::Source::check_agent(local_agent)?;
         let transport = QuicTransportConfig::builder()
             // MoQ opens one stream per group.
             .max_concurrent_uni_streams(VarInt::from_u32(4096))
@@ -139,17 +140,11 @@ impl IrohMeshTransport {
 
         let (publish, driver) = origin::Producer::new(origin::Config::default());
         spawn_driver(driver);
-        let broadcast = publish
-            .create_broadcast(local_agent)
-            .context("create local broadcast")?;
-        broadcast
-            .announce(Default::default())
-            .context("announce local broadcast")?;
         Ok(Self {
             endpoint,
-            local_agent: local_agent.to_string(),
+            latest_carrier: config.latest_carrier,
             publish,
-            broadcast,
+            broadcasts: Mutex::new(HashMap::new()),
             tracks: Mutex::new(HashSet::new()),
         })
     }
@@ -208,7 +203,7 @@ impl MeshTransport for IrohMeshTransport {
         role: Role,
         remote_agent: &str,
     ) -> anyhow::Result<IrohMoqSession> {
-        check_agent(remote_agent)?;
+        holochain_moq_mesh::Source::check_agent(remote_agent)?;
         IrohMoqSession::establish(link, role, remote_agent, &self.publish).await
     }
 
@@ -219,24 +214,45 @@ impl MeshTransport for IrohMeshTransport {
         );
     }
 
-    fn publish(&self, track: &TrackName, mode: DeliveryMode) -> anyhow::Result<Box<dyn TrackSink>> {
-        if !self
-            .tracks
-            .lock()
-            .unwrap()
-            .insert(track.as_str().to_string())
-        {
-            bail!("track {track} is already published by {}", self.local_agent);
+    fn announce(&self, broadcast: &str) -> anyhow::Result<()> {
+        let mut map = self.broadcasts.lock().unwrap();
+        if !map.contains_key(broadcast) {
+            let bc = self
+                .publish
+                .create_broadcast(broadcast)
+                .with_context(|| format!("create broadcast {broadcast}"))?;
+            let dynamic = bc.dynamic();
+            bc.announce(Default::default())
+                .with_context(|| format!("announce {broadcast}"))?;
+            map.insert(broadcast.to_string(), (bc, dynamic));
         }
-        let producer = self
-            .broadcast
-            .create_track(track.as_str(), None)
-            .with_context(|| format!("create track {track}"))?;
-        Ok(Box::new(track::Sink::new(producer, mode)))
+        Ok(())
+    }
+
+    fn publish(&self, path: &TrackPath, mode: DeliveryMode) -> anyhow::Result<Box<dyn TrackSink>> {
+        if !self.tracks.lock().unwrap().insert(path.to_string()) {
+            bail!("track {path} is already published");
+        }
+        self.announce(&path.broadcast())?;
+        let map = self.broadcasts.lock().unwrap();
+        let (bc, _) = map.get(&path.broadcast()).expect("announced above");
+        let producer = bc
+            .create_track(
+                path.track.as_str(),
+                track::track_info(mode, self.latest_carrier),
+            )
+            .with_context(|| format!("create track {path}"))?;
+        Ok(Box::new(track::Sink::new(
+            producer,
+            mode,
+            self.latest_carrier,
+        )))
     }
 
     async fn close(&self) {
-        self.broadcast.close();
+        for (_, (bc, _)) in self.broadcasts.lock().unwrap().drain() {
+            bc.close();
+        }
         self.endpoint.close().await;
     }
 }

@@ -99,7 +99,10 @@ fn mesh_depends_on_no_transport_and_no_holochain() {
 fn mesh_iroh_depends_on_no_holochain_and_not_on_the_old_stack() {
     let deps = normal_deps("crates/mesh-iroh/Cargo.toml");
     // The parser really reads the section (not a vacuous pass).
-    assert!(deps.iter().any(|d| d == "iroh") && deps.iter().any(|d| d == "moq-net"), "{deps:?}");
+    assert!(
+        deps.iter().any(|d| d == "iroh") && deps.iter().any(|d| d == "moq-net"),
+        "{deps:?}"
+    );
     for bad in HOLOCHAIN.iter().chain(&[
         "holochain-moq-node",
         "holochain-moq-realtime",

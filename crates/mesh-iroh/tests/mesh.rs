@@ -33,12 +33,10 @@ async fn two_peers_publish_and_subscribe_over_one_session() -> Result<()> {
         .publish(track.clone(), DeliveryMode::ReliableOrdered)?;
     let mut a_sub = a
         .mesh
-        .subscribe(&b.agent, track.clone(), DeliveryMode::ReliableOrdered)
-        .await?;
+        .subscribe(&b.agent, track.clone(), DeliveryMode::ReliableOrdered)?;
     let mut b_sub = b
         .mesh
-        .subscribe(&a.agent, track.clone(), DeliveryMode::ReliableOrdered)
-        .await?;
+        .subscribe(&a.agent, track.clone(), DeliveryMode::ReliableOrdered)?;
     for i in 0u64..100 {
         a_pub.send(i.to_be_bytes().to_vec())?;
         b_pub.send(i.to_be_bytes().to_vec())?;
@@ -89,8 +87,7 @@ async fn reliable_all_to_all(nodes: &[Node], n: u64) -> Result<()> {
             subs.push((
                 j,
                 node.mesh
-                    .subscribe(&other.agent, t.clone(), DeliveryMode::ReliableOrdered)
-                    .await?,
+                    .subscribe(&other.agent, t.clone(), DeliveryMode::ReliableOrdered)?,
             ));
         }
     }
@@ -138,8 +135,7 @@ async fn latest_all_to_all(nodes: &[Node], hz: u64, ticks: u64) -> Result<Latest
         for (j, other) in nodes.iter().enumerate().filter(|(j, _)| *j != i) {
             let mut sub = node
                 .mesh
-                .subscribe(&other.agent, t.clone(), DeliveryMode::Latest)
-                .await?;
+                .subscribe(&other.agent, t.clone(), DeliveryMode::Latest)?;
             readers.push(tokio::spawn(async move {
                 let mut seen: Vec<u64> = Vec::new();
                 let mut lat = Vec::new();
@@ -342,12 +338,11 @@ async fn dropping_one_peer_releases_only_its_sessions() -> Result<()> {
     // Node 0's subscriptions to 1, 2 and 3 (3 is the one that leaves).
     let mut subs = Vec::new();
     for j in 1..4 {
-        subs.push(
-            nodes[0]
-                .mesh
-                .subscribe(&nodes[j].agent, t.clone(), DeliveryMode::ReliableOrdered)
-                .await?,
-        );
+        subs.push(nodes[0].mesh.subscribe(
+            &nodes[j].agent,
+            t.clone(),
+            DeliveryMode::ReliableOrdered,
+        )?);
     }
     for n in nodes.iter_mut() {
         drain(&mut n.events);
@@ -415,8 +410,7 @@ async fn dropping_one_peer_releases_only_its_sessions() -> Result<()> {
     assert!(matches!(
         nodes[0]
             .mesh
-            .subscribe(&gone_agent, t, DeliveryMode::ReliableOrdered)
-            .await,
+            .subscribe(&gone_agent, t, DeliveryMode::ReliableOrdered),
         Err(holochain_moq_mesh::MeshError::NotConnected(_))
     ));
     println!("[peer removal] dropped {gone_agent}: all 3 others released it in {:.0} ms; their 3 remaining links kept delivering; end of the dropped peer's subscription: {end:?}", detect.as_secs_f64() * 1000.0);
