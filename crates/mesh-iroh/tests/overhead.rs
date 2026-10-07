@@ -1,6 +1,10 @@
 //! Where the bytes go: one peer pair through the (lossless) proxy, B publishes
 //! only Latest kart state at 30 Hz for 10 s, A only subscribes. The proxy
 //! records every UDP datagram's size per direction. Loopback only.
+//!
+//! Sizes are what matter here. iroh's in-band NAT traversal can move the
+//! connection off the proxy (see ARCHITECTURE.md WP3), so the packet *counts*
+//! are reported against A's own counters and not relied on.
 
 mod common;
 
@@ -66,6 +70,7 @@ async fn where_the_bytes_go() -> Result<()> {
     let mut p = bm.publish(t.clone(), DeliveryMode::Latest)?;
     let mut s = am.subscribe(&b.agent, t, DeliveryMode::Latest)?;
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let rx0 = am.peers()[0].counters.unwrap().rx_packets;
     proxy.stats.sizes_to_client.lock().unwrap().clear();
     proxy.stats.sizes_to_target.lock().unwrap().clear();
     let mut iv = tokio::time::interval(Duration::from_micros(33_333));
@@ -94,7 +99,12 @@ async fn where_the_bytes_go() -> Result<()> {
         sum(&up),
         hist(&up)
     );
-    println!("[overhead]   delivered {}", s.stats().delivered);
+    let a_rx = am.peers()[0].counters.unwrap().rx_packets - rx0;
+    println!(
+        "[overhead]   delivered {}; A received {a_rx} packets, {} of them seen by the proxy",
+        s.stats().delivered,
+        down.len()
+    );
     let mut sorted = down.clone();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2] as usize;

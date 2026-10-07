@@ -12,6 +12,10 @@
 //! roster from the others', and starts sending at a common wall-clock instant.
 //! Latency is receive time minus send time on the same host clock.
 //!
+//! `--netem-loss P` re-runs the whole benchmark (parent, relay, every peer)
+//! inside a private unprivileged network namespace whose loopback drops P %
+//! of packets (`tc netem loss P% seed 7`), so every path is lossy.
+//!
 //! LOOPBACK ONLY: all processes share one machine. Nothing here measures an
 //! Internet path, a remote relay or NAT traversal.
 
@@ -42,6 +46,7 @@ struct Args {
     child: Option<usize>,
     dir: Option<PathBuf>,
     relay_url: Option<String>,
+    netem_loss: Option<f64>,
 }
 
 fn parse() -> Result<Args> {
@@ -55,6 +60,7 @@ fn parse() -> Result<Args> {
         child: None,
         dir: None,
         relay_url: None,
+        netem_loss: None,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -76,6 +82,7 @@ fn parse() -> Result<Args> {
             "--child" => a.child = Some(val.parse()?),
             "--dir" => a.dir = Some(val.into()),
             "--relay-url" => a.relay_url = Some(val),
+            "--netem-loss" => a.netem_loss = Some(val.parse()?),
             other => bail!("unknown argument {other}"),
         }
         i += 2;
@@ -569,7 +576,11 @@ async fn parent(a: Args) -> Result<()> {
     } else {
         "datagram"
     };
-    println!("== mesh_bench: {n} peers ({n} processes), {mode}, Latest carrier {carrier}, {} s, state {} Hz, events {} Hz, LOOPBACK ==", a.secs, a.hz, a.events_hz);
+    let loss = a
+        .netem_loss
+        .map(|p| format!(", netem loss {p}%"))
+        .unwrap_or_default();
+    println!("== mesh_bench: {n} peers ({n} processes), {mode}, Latest carrier {carrier}, {} s, state {} Hz, events {} Hz{loss}, LOOPBACK ==", a.secs, a.hz, a.events_hz);
     println!("mesh up (per process, max)      : {:.0} ms; {pairs} directed pairs, {} logical connections", max(&mesh_ms), pairs / 2);
     println!("Latest   sent/received/skipped  : {state_sent_total} / {state_recv} / {} ; min per-pair rate {min_hz:.2} Hz", state_sent_total - state_recv);
     println!(
@@ -599,6 +610,17 @@ async fn parent(a: Args) -> Result<()> {
 
 fn main() -> Result<()> {
     let a = parse()?;
+    if let (Some(p), None, Err(_)) = (a.netem_loss, a.child, std::env::var("MESH_BENCH_IN_NETNS")) {
+        let script = format!("ip link set lo up && tc qdisc add dev lo root netem loss {p}% seed 7 && exec \"$0\" \"$@\"");
+        let st = std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net", "sh", "-c", &script])
+            .arg(std::env::current_exe()?)
+            .args(std::env::args().skip(1))
+            .env("MESH_BENCH_IN_NETNS", "1")
+            .status()
+            .context("unshare (unprivileged network namespace) is required for --netem-loss")?;
+        std::process::exit(st.code().unwrap_or(1));
+    }
     let rt = match a.child {
         // One small runtime per peer process, like one game backend per player.
         Some(_) => tokio::runtime::Builder::new_multi_thread()
