@@ -3126,6 +3126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-platform"
+version = "0.1.0"
+dependencies = [
+ "holochain-moq-protocol",
+ "serde",
+]
+
+[[package]]
 name = "holochain-moq-playback"
 version = "0.1.0"
 dependencies = [

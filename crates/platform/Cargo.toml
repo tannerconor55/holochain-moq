@@ -1,0 +1,10 @@
+[package]
+name = "holochain-moq-platform"
+description = "Gaming platform types (game identity, release metadata, install rules) shared by the future Gaming Hub and gaming_directory DNA. Pure, game-neutral, no I/O. Deliberately outside crates/protocol: anything compiled into the current integrity zome changes its DNA hash."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-protocol = { workspace = true }
+serde = { workspace = true }

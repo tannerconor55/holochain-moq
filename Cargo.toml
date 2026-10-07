@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/platform",
     "crates/mesh",
     "crates/mesh-iroh",
     "crates/kart-wire",
