@@ -3008,6 +3008,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-mesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "holochain-moq-protocol",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "holochain-moq-mic-alsa"
 version = "0.1.0"
 dependencies = [

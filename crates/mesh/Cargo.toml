@@ -1,0 +1,15 @@
+[package]
+name = "holochain-moq-mesh"
+description = "Transport-neutral symmetric peer mesh (WP2): one session per peer pair, every peer publishes and subscribes. No iroh, MoQ, TLS or Holochain dependency."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-protocol = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }

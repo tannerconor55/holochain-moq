@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/mesh",
     "crates/realtime",
     "crates/node",
     "crates/hdk-bridge",
@@ -74,6 +75,7 @@ axum = "0.8"
 holochain-moq-protocol = { path = "crates/protocol" }
 holochain-moq-realtime = { path = "crates/realtime" }
 holochain-moq-node = { path = "crates/node" }
+holochain-moq-mesh = { path = "crates/mesh" }
 holochain-moq-hdk-bridge = { path = "crates/hdk-bridge" }
 holochain-moq-codec-av1 = { path = "crates/codec-av1" }
 holochain-moq-video = { path = "crates/video" }
