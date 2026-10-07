@@ -5,6 +5,7 @@ members = [
     "crates/mesh",
     "crates/mesh-iroh",
     "crates/kart-wire",
+    "crates/clock",
     "crates/realtime",
     "crates/node",
     "crates/hdk-bridge",

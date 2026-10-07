@@ -161,3 +161,25 @@ fn the_game_wire_format_is_dependency_free_and_the_mesh_is_game_agnostic() {
         );
     }
 }
+
+#[test]
+fn the_clock_layer_sits_above_the_mesh_and_knows_no_transport() {
+    let deps = normal_deps("crates/clock/Cargo.toml");
+    assert!(deps.iter().any(|d| d == "holochain-moq-mesh"), "{deps:?}");
+    for bad in TRANSPORT.iter().chain(HOLOCHAIN).chain(&[
+        "holochain-moq-mesh-iroh",
+        "holochain-moq-kart-wire",
+        "holochain-moq-node",
+    ]) {
+        assert!(
+            !deps.iter().any(|d| d == bad),
+            "crates/clock depends on {bad}"
+        );
+    }
+    for m in ["crates/mesh/Cargo.toml", "crates/mesh-iroh/Cargo.toml"] {
+        assert!(
+            !normal_deps(m).iter().any(|d| d.contains("clock")),
+            "{m} depends on the clock layer"
+        );
+    }
+}

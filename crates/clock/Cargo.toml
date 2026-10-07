@@ -1,0 +1,20 @@
+[package]
+name = "holochain-moq-clock"
+description = "Transport-neutral host-relative clock estimation (NTP-style 4-timestamp samples, robust estimator) and race-start scheduling over the mesh. Knows no iroh, MoQ, TLS or Holochain."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-mesh = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+holochain-moq-mesh-iroh = { workspace = true, features = ["test-utils"] }
+holochain-moq-kart-wire = { path = "../kart-wire" }
+iroh = { workspace = true, features = ["test-utils"] }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -2934,6 +2934,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-clock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "holochain-moq-kart-wire",
+ "holochain-moq-mesh",
+ "holochain-moq-mesh-iroh",
+ "iroh",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "holochain-moq-codec-av1"
 version = "0.1.0"
 dependencies = [
