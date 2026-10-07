@@ -35,3 +35,9 @@ tracing-subscriber = { workspace = true }
 holochain-moq-node = { workspace = true }
 # Delivery tests and benchmarks carry real game messages.
 holochain-moq-kart-wire = { path = "../kart-wire" }
+holochain-moq-protocol = { workspace = true }
+serde_json = { workspace = true }
+
+[[example]]
+name = "mesh_bench"
+required-features = ["test-utils"]

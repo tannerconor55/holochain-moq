@@ -3053,6 +3053,7 @@ dependencies = [
  "iroh",
  "moq-net",
  "moq-tokio",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

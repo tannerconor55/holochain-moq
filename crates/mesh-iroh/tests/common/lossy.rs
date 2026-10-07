@@ -22,6 +22,9 @@ pub struct ProxyStats {
     /// Datagrams / bytes forwarded target -> client (the client's receive side).
     pub to_client: AtomicU64,
     pub to_client_bytes: AtomicU64,
+    /// Sizes of datagrams forwarded in each direction (for overhead analysis).
+    pub sizes_to_target: Mutex<Vec<u16>>,
+    pub sizes_to_client: Mutex<Vec<u16>>,
 }
 
 impl ProxyStats {
@@ -93,6 +96,7 @@ impl LossyProxy {
                                     st.forwarded.fetch_add(1, Ordering::Relaxed);
                                     st.to_client.fetch_add(1, Ordering::Relaxed);
                                     st.to_client_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                                    st.sizes_to_client.lock().unwrap().push(n as u16);
                                     let _ = front.send_to(&b[..n], client).await;
                                 }
                             }
@@ -105,6 +109,7 @@ impl LossyProxy {
                     st.dropped.fetch_add(1, Ordering::Relaxed);
                 } else {
                     st.forwarded.fetch_add(1, Ordering::Relaxed);
+                    st.sizes_to_target.lock().unwrap().push(n as u16);
                     let _ = up.send_to(&buf[..n], target).await;
                 }
             }

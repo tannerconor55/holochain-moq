@@ -51,11 +51,22 @@ pub struct Bound {
 
 /// Bind `n` endpoints with agents 0..n.
 pub async fn bind(n: usize, reach: impl Fn() -> Reach) -> Result<Vec<Bound>> {
+    bind_with(n, reach, holochain_moq_mesh_iroh::LatestCarrier::default()).await
+}
+
+/// [`bind`] with an explicit `Latest` carrier.
+pub async fn bind_with(
+    n: usize,
+    reach: impl Fn() -> Reach,
+    carrier: holochain_moq_mesh_iroh::LatestCarrier,
+) -> Result<Vec<Bound>> {
     let mut out = Vec::new();
     for i in 0..n {
         let reach = reach();
         let relay = !matches!(reach, Reach::DirectOnly);
-        let transport = IrohMeshTransport::bind(config(reach), &agent(i)).await?;
+        let mut cfg = config(reach);
+        cfg.latest_carrier = carrier;
+        let transport = IrohMeshTransport::bind(cfg, &agent(i)).await?;
         let addr = transport
             .addr(if relay {
                 Duration::from_secs(10)

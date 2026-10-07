@@ -16,7 +16,7 @@ use holochain_moq_mesh::{
     DeliveryMode, MeshConfig, MeshError, MeshSession, PeerBinding, Source, TrackName, LATEST_QUEUE,
     RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD,
 };
-use holochain_moq_mesh_iroh::EndpointAddr;
+use holochain_moq_mesh_iroh::{EndpointAddr, LatestCarrier};
 
 fn kart(tick: u32) -> Vec<u8> {
     KartState {
@@ -228,8 +228,8 @@ async fn a_latest_burst_stays_bounded_and_the_newest_wins() -> Result<()> {
 /// A reliable event stream through a lossy proxy, and Latest through the same
 /// proxy, at 0 %, 2 % and 5 % packet loss. The connection must stay on the
 /// proxied path for the whole run.
-async fn lossy_run(loss: f64) -> Result<String> {
-    let mut bound = bind(2, direct).await?;
+async fn lossy_run(loss: f64, carrier: LatestCarrier) -> Result<String> {
+    let mut bound = bind_with(2, direct, carrier).await?;
     let b_real = bound[1]
         .addr
         .ip_addrs()
@@ -363,7 +363,7 @@ async fn lossy_run(loss: f64) -> Result<String> {
     let newest = got.last().map(|g| g.0);
     let span = got.last().unwrap().1.saturating_sub(got[0].1).as_secs_f64();
     let line = format!(
-        "loss {:>3.0}%: proxy dropped {} of {} pkts, {proxied_bytes} B (A moved {a_pkts} pkts, {a_bytes} B; A rx {a_rx} pkts, {rx_not_proxied} not via proxy (iroh path probes); {bypass_bytes} B of A's tx not via proxy = path probes; quic lost {}) | Latest: sent {TICKS}, received {}, missing {}, stale {}, newest {newest:?}, {:.1} Hz, p50/p95/p99 {s50}/{s95}/{s99} us | Reliable: sent {}, received {}, dups {dups}, gaps {gaps}, in order, p50/p95/p99 {e50}/{e95}/{e99} us | peer {:?}",
+        "{carrier:?} loss {:>3.0}%: proxy dropped {} of {} pkts, {proxied_bytes} B (A moved {a_pkts} pkts, {a_bytes} B; A rx {a_rx} pkts, {rx_not_proxied} not via proxy (iroh path probes); {bypass_bytes} B of A's tx not via proxy = path probes; quic lost {}) | Latest: sent {TICKS}, received {}, missing {}, stale {}, newest {newest:?}, {:.1} Hz, p50/p95/p99 {s50}/{s95}/{s99} us | Reliable: sent {}, received {}, dups {dups}, gaps {gaps}, in order, p50/p95/p99 {e50}/{e95}/{e99} us | peer {:?}",
         loss * 100.0,
         drop1 - drop0,
         proxied,
@@ -377,9 +377,11 @@ async fn lossy_run(loss: f64) -> Result<String> {
         info.kind,
     );
     assert_eq!(dups + gaps, 0, "reliable: no duplicates, no gaps");
-    // The injected loss really hit the data: the Latest loss rate tracks it.
+    // The injected loss really hit the data: with the unreliable datagram
+    // carrier the Latest loss rate tracks it. (The stream carrier retransmits,
+    // so it loses almost nothing and pays in latency instead.)
     let lost_frac = 1.0 - got.len() as f64 / TICKS as f64;
-    if loss > 0.0 {
+    if loss > 0.0 && carrier == LatestCarrier::Datagram {
         assert!(
             lost_frac >= loss * 0.5 && lost_frac <= loss * 2.5,
             "Latest lost {lost_frac:.3} with {loss} injected"
@@ -400,11 +402,23 @@ async fn loss_0_2_5_percent() -> Result<()> {
     init_tracing();
     let mut lines = Vec::new();
     for loss in [0.0, 0.02, 0.05] {
-        lines.push(lossy_run(loss).await?);
+        lines.push(lossy_run(loss, LatestCarrier::Datagram).await?);
     }
     for l in lines {
         println!("[loss] {l}");
     }
+    Ok(())
+}
+
+/// The WP3 carrier comparison: Latest as one MoQ group (one QUIC stream) per
+/// object instead of a datagram, at 5 % loss. A lost packet is retransmitted
+/// on its stream, so latency grows and stale state still arrives (and is then
+/// discarded as stale or superseded).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loss_5_percent_stream_carrier_for_comparison() -> Result<()> {
+    init_tracing();
+    let line = lossy_run(0.05, LatestCarrier::StreamPerObject).await?;
+    println!("[loss] {line}");
     Ok(())
 }
 
