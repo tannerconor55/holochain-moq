@@ -1,0 +1,113 @@
+{
+  "byte_order": "big-endian",
+  "events": [
+    {
+      "fields": {
+        "lap": 2,
+        "lap_ms": 50000,
+        "len": 5,
+        "seq": 7,
+        "tick": 3600,
+        "type": 7,
+        "version": 1
+      },
+      "hex": "01070000000700000e100005020000c350",
+      "name": "lap"
+    },
+    {
+      "fields": {
+        "class": 2,
+        "grid": [
+          {
+            "ai": 1
+          },
+          {
+            "player": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "laps": 3,
+        "len": 71,
+        "seed": "0x0102030405060708",
+        "seq": 0,
+        "start_at_ms": 1700000000000,
+        "tick": 0,
+        "track_id": "palm-cove",
+        "type": 1,
+        "version": 1
+      },
+      "hex": "0101000000000000000000470000018bcfe56800010203040506070803020970616c6d2d636f766502010100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "name": "race-start"
+    },
+    {
+      "fields": {
+        "by_slot": 5,
+        "kind": 1,
+        "len": 6,
+        "projectile_id": 3735928559,
+        "seq": 4294967294,
+        "tick": 4294967295,
+        "type": 6,
+        "version": 1
+      },
+      "hex": "0106fffffffeffffffff00060105deadbeef",
+      "name": "hit-max-seq"
+    },
+    {
+      "fields": {
+        "decoder": "keep as Unknown, skip",
+        "len": 3,
+        "seq": 5,
+        "tick": 9,
+        "type": 200,
+        "version": 1
+      },
+      "hex": "01c800000005000000090003aabbcc",
+      "name": "unknown-type-200"
+    }
+  ],
+  "format": "turbo-kart-rally wire v1",
+  "kart_state": [
+    {
+      "fields": {
+        "drift": 2,
+        "flags": 3,
+        "heading": 3.0,
+        "item": 4,
+        "itemCount": 1,
+        "lap": 2,
+        "pos": [
+          1.0,
+          -2.0,
+          0.5
+        ],
+        "tick": 16909060,
+        "trackT": 0.75,
+        "vel": [
+          0.0,
+          0.25,
+          -0.5
+        ],
+        "version": 1
+      },
+      "hex": "0103010203043f800000c00000003f000000000000003e800000bf00000040400000020401023f400000",
+      "name": "airborne-drifting"
+    }
+  ],
+  "rejects": [
+    {
+      "error": "Truncated",
+      "hex": "0103010203043f800000c00000003f000000000000003e800000bf00000040400000020401023f4000",
+      "name": "kart-state-41-bytes"
+    },
+    {
+      "error": "UnknownVersion",
+      "hex": "0203010203043f800000c00000003f000000000000003e800000bf00000040400000020401023f400000",
+      "name": "kart-state-version-2"
+    },
+    {
+      "error": "PayloadTooLarge",
+      "hex": "0107000000000000000004010000",
+      "name": "event-len-over-1024"
+    }
+  ]
+}

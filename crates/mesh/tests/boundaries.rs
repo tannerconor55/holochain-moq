@@ -134,3 +134,30 @@ fn no_media_crate_depends_on_the_mesh() {
         );
     }
 }
+
+#[test]
+fn the_game_wire_format_is_dependency_free_and_the_mesh_is_game_agnostic() {
+    assert!(
+        normal_deps("crates/kart-wire/Cargo.toml").is_empty(),
+        "kart-wire has no dependencies"
+    );
+    for m in ["crates/mesh/Cargo.toml", "crates/mesh-iroh/Cargo.toml"] {
+        assert!(
+            !normal_deps(m).iter().any(|d| d.contains("kart")),
+            "{m} depends on game code"
+        );
+    }
+    // Game payloads never reach the durable layer.
+    for m in [
+        "crates/protocol/Cargo.toml",
+        "crates/node/Cargo.toml",
+        "crates/hdk-bridge/Cargo.toml",
+    ] {
+        assert!(
+            !normal_deps(m)
+                .iter()
+                .any(|d| d.contains("kart") || d.contains("mesh")),
+            "{m}"
+        );
+    }
+}

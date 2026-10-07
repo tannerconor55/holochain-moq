@@ -3009,6 +3009,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-kart-wire"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "holochain-moq-media-timeline"
 version = "0.1.0"
 dependencies = [
