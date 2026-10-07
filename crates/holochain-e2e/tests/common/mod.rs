@@ -71,6 +71,31 @@ pub fn dna_bundle() -> PathBuf {
     path
 }
 
+/// The TEST-ONLY DNA: production integrity + coordinator, plus the `forge`
+/// coordinator (`dna/forge`) that commits records unchecked. Same integrity
+/// zome, so validation is exactly production's.
+pub fn forge_dna_bundle() -> PathBuf {
+    static BUILT: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut built = BUILT.lock().unwrap();
+    if let Some(p) = &*built {
+        return p.clone();
+    }
+    dna_bundle(); // builds every zome, forge included
+    let dna_dir = repo_root().join("dna");
+    let status = std::process::Command::new("hc")
+        .args(["dna", "pack", "workdir/forge"])
+        .current_dir(&dna_dir)
+        .status()
+        .expect("run `hc dna pack`");
+    assert!(status.success(), "`hc dna pack workdir/forge` failed");
+    let path = dna_dir
+        .join("workdir/forge/moq_directory.dna")
+        .canonicalize()
+        .unwrap();
+    *built = Some(path.clone());
+    path
+}
+
 pub struct Network {
     pub conductors: SweetConductorBatch,
     pub cells: Vec<SweetCell>,
@@ -112,12 +137,17 @@ impl Network {
 /// `n` separate conductors, each with its own agent, all running the same
 /// DNA, gossiping with each other.
 pub async fn network(n: usize) -> Network {
+    network_with(n, &dna_bundle()).await
+}
+
+/// `n` conductors running the DNA bundle at `bundle`.
+pub async fn network_with(n: usize, bundle: &Path) -> Network {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .try_init();
-    let dna = SweetDnaFile::from_bundle(&dna_bundle()).await.unwrap();
+    let dna = SweetDnaFile::from_bundle(bundle).await.unwrap();
     let mut conductors = SweetConductorBatch::standard(n).await;
     let apps = conductors.setup_app(APP_ID, &[dna]).await.unwrap();
     let cells: Vec<SweetCell> = apps

@@ -1565,3 +1565,80 @@ fn the_application_session_stays_above_the_transport_and_reads_no_clock() {
         );
     }
 }
+
+/// WP7: the lobby control plane and the realtime game path stay apart. The game
+/// delivery crates (mesh, transport, wire format, clock, host authority) cannot
+/// reach Holochain or the lobby API, so a Holochain call during delivery is not
+/// even expressible there; and the DNA's lobby records carry no game state.
+#[test]
+fn the_lobby_control_plane_and_the_realtime_game_path_stay_apart() {
+    let deps = |rel: &str| {
+        let m = fs::read_to_string(root().join(rel)).unwrap();
+        let d = m.split("[dependencies]").nth(1).unwrap_or("").to_string();
+        d.split("[dev-dependencies]").next().unwrap().to_string()
+    };
+    for rel in [
+        "crates/mesh/Cargo.toml",
+        "crates/mesh-iroh/Cargo.toml",
+        "crates/kart-wire/Cargo.toml",
+        "crates/clock/Cargo.toml",
+        "crates/host/Cargo.toml",
+    ] {
+        let d = deps(rel);
+        for forbidden in [
+            "hdk",
+            "hdi",
+            "holo_hash",
+            "holochain_client",
+            "holochain-moq-node",
+            "holochain-moq-hdk-bridge",
+            "moq_directory",
+        ] {
+            assert!(!d.contains(forbidden), "{rel} depends on `{forbidden}`");
+        }
+    }
+    for rel in [
+        "crates/mesh/src",
+        "crates/mesh-iroh/src",
+        "crates/kart-wire/src",
+        "crates/clock/src",
+        "crates/host/src",
+    ] {
+        for (path, src) in sources(rel) {
+            let src = code(&src);
+            for w in [
+                "LobbyView",
+                "LobbyStatus",
+                "RaceResult",
+                "HolochainPeerDirectory",
+                "PeerDirectory",
+                "ZomeCaller",
+            ] {
+                assert!(!has_word(&src, w), "{} mentions `{w}`", path.display());
+            }
+        }
+    }
+    for rel in ["dna", "crates/protocol/src/lobby.rs"] {
+        let files = if rel.ends_with(".rs") {
+            vec![(
+                root().join(rel),
+                fs::read_to_string(root().join(rel)).unwrap(),
+            )]
+        } else {
+            sources(rel)
+        };
+        for (path, src) in files {
+            let src = code(&src);
+            for w in [
+                "KartState",
+                "kart_wire",
+                "MeshSession",
+                "Heartbeat",
+                "AiFrame",
+                "HostChanged",
+            ] {
+                assert!(!has_word(&src, w), "{} mentions `{w}`", path.display());
+            }
+        }
+    }
+}

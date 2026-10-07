@@ -33,3 +33,10 @@ uuid = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
+# WP7: lobby tests build a real iroh mesh + host session from DHT-sourced
+# endpoints to prove zero Holochain calls during delivery.
+serde = { workspace = true }
+holochain-moq-mesh = { workspace = true }
+holochain-moq-mesh-iroh = { workspace = true }
+holochain-moq-host = { path = "../host" }
+holochain-moq-clock = { path = "../clock" }

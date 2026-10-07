@@ -437,7 +437,8 @@ async fn incoherent_and_foreign_sessions_are_rejected_and_ids_cannot_be_taken_ov
 
 /// The zome API is exactly these control-plane functions - nothing
 /// media-shaped (`send_media`/`publish_frame`/...). (`sign_admission_proof` is the one
-/// Stage 14F addition: a signature over a session/challenge, never media.)
+/// Stage 14F addition: a signature over a session/challenge, never media. WP7 adds the
+/// lobby functions: durable lobby/membership/status/result records, never game state.)
 #[test]
 fn coordinator_exposes_only_the_control_plane_functions() {
     let src = std::fs::read_to_string(
@@ -462,16 +463,24 @@ fn coordinator_exposes_only_the_control_plane_functions() {
     assert_eq!(
         names,
         [
+            "create_lobby",
             "create_stream",
             "get_endpoint_advertisements",
+            "get_leaderboard",
+            "get_lobby",
             "get_peer",
             "get_session",
             "get_stream",
+            "join_lobby",
+            "leave_lobby",
             "list_live_sessions",
+            "list_open_lobbies",
             "list_streams",
             "publish_endpoint",
             "publish_endpoint_advertisement",
+            "publish_result",
             "publish_session",
+            "set_lobby_status",
             // Stage 14F: signs a private-session admission proof with the agent's own key.
             "sign_admission_proof"
         ]
