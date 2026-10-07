@@ -292,3 +292,102 @@ async fn baseline_existing_quinn_stack_latency() -> Result<()> {
     assert!(received as u64 >= N * 9 / 10, "baseline delivered most objects");
     Ok(())
 }
+
+/// WP3 MoQ-level additions, checked against the old stack in the reverse
+/// direction: a moq-net draft-16 *server* (moq-tokio, noq) publishes, the
+/// unchanged moq-transport 0.16.2 `MoqSubscribeNode` subscribes with its
+/// pinned-TLS client. `mode` is what the game mesh uses for `Latest`
+/// (track datagrams) or `ReliableOrdered` (64-object groups, rotated).
+async fn moq_net_server_to_existing_subscriber(datagrams: bool, paced: bool) -> Result<(usize, Vec<u64>)> {
+    use holochain_moq_realtime::{MoqSubscribeNode, SubscribeTransport, Subscription};
+    common::init_tracing();
+    let dir = std::env::temp_dir().join(format!("wp3-interop-{}-{datagrams}-{paced}", std::process::id()));
+    let (cert, key, identity) = certs::generate_localhost_cert_with_identity(&dir)?;
+    let _guard = tempdir::Dir(dir);
+
+    let origin = moq_tokio::origin::spawn();
+    let bc = origin.create_broadcast("alice")?;
+    let mut track = bc.create_track("state", None)?;
+    bc.announce(Default::default())?;
+
+    let mut cfg = moq_tokio::server::Config::default();
+    cfg.listen.bind = Some(moq_tokio::listen::Bind::Addr("127.0.0.1:0".parse()?));
+    cfg.listen.tls.cert = vec![cert.clone()];
+    cfg.listen.tls.key = vec![key.clone()];
+    cfg.listen.version = vec!["moq-transport-16".parse().map_err(anyhow::Error::msg)?];
+    let server = cfg.init()?;
+    let port = server.local_addr()?.port();
+    let consumer = origin.consume();
+    tokio::spawn(async move { server.serve_publish(consumer).await });
+
+    let url: url::Url = format!("https://127.0.0.1:{port}/").parse()?;
+    let mut node = MoqSubscribeNode::new_with_pinned_identity(url, "alice", identity)?;
+    tokio::time::timeout(Duration::from_secs(10), node.connect()).await??;
+    let mut sub = node.subscribe("state").await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    const N: u64 = 150;
+    if datagrams {
+        for i in 0..N {
+            track.append_datagram(Timestamp::now(), i.to_be_bytes().to_vec())?;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    } else {
+        let mut group = None;
+        for i in 0..N {
+            let gid = i / 64;
+            if group.as_ref().is_none_or(|g: &moq_net::group::Producer| g.sequence != gid) {
+                if let Some(old) = group.take() {
+                    old.finish()?;
+                }
+                group = Some(track.create_group(gid.into())?);
+            }
+            group.as_mut().unwrap().write_frame(Timestamp::now(), i.to_be_bytes().to_vec())?;
+            if paced {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        group.unwrap().finish()?;
+    }
+    let mut got = Vec::new();
+    while let Ok(Ok(Some(b))) = tokio::time::timeout(Duration::from_secs(2), sub.recv()).await {
+        got.push(u64::from_be_bytes(b[..8].try_into()?));
+        if got.len() as u64 == N {
+            break;
+        }
+    }
+    Ok((N as usize, got))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moq_net_datagrams_reach_the_existing_subscriber() -> Result<()> {
+    let (n, got) = moq_net_server_to_existing_subscriber(true, true).await?;
+    println!("[interop wp3 datagrams] moq-net datagram track -> moq-transport 0.16.2 subscriber: {}/{n}, first {:?} last {:?}", got.len(), got.first(), got.last());
+    assert!(got.windows(2).all(|w| w[1] > w[0]), "ordered");
+    assert!(got.len() * 10 >= n * 9, "at least 90 % of datagrams on loopback");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moq_net_rotating_groups_reach_the_existing_subscriber_in_order() -> Result<()> {
+    // Paced (5 ms/object, as events are): each group ends before the next opens.
+    let (n, got) = moq_net_server_to_existing_subscriber(false, true).await?;
+    println!("[interop wp3 groups paced] moq-net 64-object rotating groups -> moq-transport 0.16.2 subscriber: {}/{n}", got.len());
+    assert_eq!(got, (0..n as u64).collect::<Vec<_>>(), "every object, in order, across group boundaries");
+    Ok(())
+}
+
+/// Recorded old-stack behaviour, not a moq-net defect: when several groups'
+/// streams are in flight at once, moq-transport 0.16.2's subscriber keeps only
+/// the newest group (PROTOCOL.md Phase 6A: "the receiving side drops a
+/// subgroup with a lower group id than one already seen"). The game mesh's own
+/// ReliableOrdered reader reorders and fetches instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_existing_subscriber_keeps_only_the_newest_group_of_a_burst() -> Result<()> {
+    let (n, got) = moq_net_server_to_existing_subscriber(false, false).await?;
+    println!("[interop wp3 groups burst] {} of {n} objects: {:?}..{:?}", got.len(), got.first(), got.last());
+    assert!(!got.is_empty() && got.windows(2).all(|w| w[1] == w[0] + 1), "a contiguous run");
+    assert_eq!(*got.last().unwrap(), n as u64 - 1, "ends at the newest object");
+    assert_eq!(got[0] % 64, 0, "starts at a group boundary");
+    Ok(())
+}

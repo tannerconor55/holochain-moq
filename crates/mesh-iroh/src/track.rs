@@ -341,6 +341,8 @@ where
     }
 }
 
+// Transient, one per poll inside `read_latest`; boxing would add an allocation per object.
+#[allow(clippy::large_enum_variant)]
 enum Next {
     Datagram(moq_net::Result<Option<moq_net::Datagram>>),
     Group(moq_net::Result<Option<group::Consumer>>),
