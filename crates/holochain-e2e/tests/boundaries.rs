@@ -1642,3 +1642,91 @@ fn the_lobby_control_plane_and_the_realtime_game_path_stay_apart() {
         }
     }
 }
+
+/// Gaming hApp architecture: the generic realtime layers (the future
+/// `game-net`: mesh, mesh-iroh, clock, host) know no specific game. They do not
+/// depend on Turbo Kart's wire format or control-plane rules, nor on the
+/// platform registry, so a second game can use them unchanged (see
+/// `crates/host/tests/second_game.rs`, which compiles without any kart crate).
+#[test]
+fn the_generic_realtime_layers_know_no_specific_game() {
+    let deps = |rel: &str| {
+        let m = fs::read_to_string(root().join(rel)).unwrap();
+        let d = m.split("[dependencies]").nth(1).unwrap_or("").to_string();
+        d.split("[dev-dependencies]").next().unwrap().to_string()
+    };
+    let generic = ["mesh", "mesh-iroh", "clock", "host"];
+    for c in generic {
+        let rel = format!("crates/{c}/Cargo.toml");
+        assert!(
+            !deps(&rel).contains("kart-wire"),
+            "{rel} depends on kart-wire"
+        );
+        for (path, src) in sources(&format!("crates/{c}/src")) {
+            let src = code(&src);
+            for w in [
+                "kart_wire",
+                "KartState",
+                "CHARACTER_IDS",
+                "TRACKS",
+                "RaceResult",
+                "GameRelease",
+            ] {
+                assert!(!has_word(&src, w), "{} mentions `{w}`", path.display());
+            }
+            assert!(
+                !src.contains("lobby::") && !src.contains("holochain_moq_platform"),
+                "{} uses the lobby or registry types",
+                path.display()
+            );
+        }
+    }
+    // The second-game fixture is built where no kart crate is even available.
+    let host = fs::read_to_string(root().join("crates/host/Cargo.toml")).unwrap();
+    assert!(
+        !host.contains("kart"),
+        "crates/host must not depend on kart crates, even for tests"
+    );
+}
+
+/// The shared/platform types and the Turbo Kart types stay apart inside
+/// `crates/protocol`: the game registry is game-neutral, and Turbo Kart's
+/// rules (roster, tracks, classes, lap floors) live only in its own module.
+#[test]
+fn platform_types_and_turbo_kart_types_stay_apart() {
+    let game = code(&fs::read_to_string(root().join("crates/platform/src/lib.rs")).unwrap());
+    for w in ["lobby", "Lobby", "RaceResult", "CHARACTER_IDS", "TRACKS"] {
+        assert!(!has_word(&game, w), "crates/platform mentions `{w}`");
+    }
+    // The registry must not ride into the current DNA (it would change its hash).
+    for rel in [
+        "dna/integrity/Cargo.toml",
+        "dna/coordinator/Cargo.toml",
+        "crates/protocol/Cargo.toml",
+    ] {
+        let m = fs::read_to_string(root().join(rel)).unwrap();
+        assert!(
+            !m.contains("holochain-moq-platform"),
+            "{rel} depends on crates/platform"
+        );
+    }
+    for (path, src) in sources("crates/protocol/src") {
+        if path.ends_with("lobby.rs") {
+            continue;
+        }
+        let src = code(&src);
+        for w in [
+            "CHARACTER_IDS",
+            "TRACKS",
+            "MIN_LAP_MS",
+            "palm-cove",
+            "150cc",
+        ] {
+            assert!(
+                !src.contains(w),
+                "{} holds Turbo Kart rule `{w}`",
+                path.display()
+            );
+        }
+    }
+}
