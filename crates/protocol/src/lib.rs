@@ -14,6 +14,7 @@ pub mod admission;
 pub mod advertisement;
 pub mod capability;
 pub mod endpoint;
+pub mod lobby;
 pub mod peer;
 pub mod session;
 pub mod stream;

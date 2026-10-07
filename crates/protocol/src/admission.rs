@@ -79,7 +79,7 @@ pub struct SignAdmissionProofOutput {
 /// (De)serialization of a 64-byte signature as a sequence of 64 bytes - byte-for-byte what a
 /// variable-length byte vector produced, so nothing on the wire changes. A sequence of any other
 /// length is rejected on the way in.
-mod signature_bytes {
+pub(crate) mod signature_bytes {
     use serde::{
         de::{self, SeqAccess, Visitor},
         ser::SerializeSeq,

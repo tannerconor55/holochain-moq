@@ -16,3 +16,6 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 # format without depending on `holo_hash` (see `session.rs` module docs on why).
 ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
 base64 = "0.22"
+# WP7 invite-code KDF and proof digest. Already in the tree via ed25519-dalek; pure Rust,
+# builds for wasm32.
+sha2 = { workspace = true }
