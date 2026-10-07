@@ -24,7 +24,8 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | 6D | Subscriber-driven keyframe recovery over MoQ | **done, tested** - `crates/realtime/src/recovery.rs`, `crates/codec-av1`, `crates/holochain-e2e/tests/keyframe_recovery.rs` |
 | 6D | Subscriber-driven keyframe recovery | **done, tested** - `crates/realtime/src/recovery.rs`, `crates/codec-av1` (`RecoveringDecoder`, encoder worker), `crates/holochain-e2e/tests/keyframe_recovery.rs` |
 | 7+ | Audio, relay, permissions, hardening | see CLAUDE.md for later stages; this table was not kept up to date past 6D |
-| WP1 spike | Transport decision for kart online: MoQ over iroh (direct + relay) | **spike done, decision proposed** - `prototypes/wp1-iroh-spike` (own workspace), ARCHITECTURE.md "Transport decision (WP1 spike)". Loopback only; **no NAT / real-network test run**; production crates unchanged |
+| WP1 spike | Transport decision for kart online: MoQ over iroh (direct + relay) | **spike done, decision proposed** - `prototypes/wp1-iroh-spike` (own workspace), ARCHITECTURE.md "Transport decision (WP1 spike)". Loopback only; **no NAT / real-network test run**; media crates unchanged; adopted for the game mesh in WP2 |
+| WP2 | Symmetric game mesh: `MeshSession` over `MeshTransport`, iroh + moq-net (draft-16), AgentPubKey <-> iroh EndpointId binding | **done, tested on loopback + local relay** - `crates/mesh`, `crates/mesh-iroh`. **No real-network / NAT test run**; no reconnect (WP6) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before
@@ -764,3 +765,82 @@ device available).
   moq-transport still reads whole objects into memory, so a peer sending huge control objects is not
   defended against. Broader hostile-peer hardening remains future work.
 - Only AV1; audio, reconnection, relay/NAT, adaptive bitrate and physical-camera validation remain.
+
+## WP2: symmetric game mesh (kart online)
+
+```text
+Holochain (identity, discovery, lobby membership, results)   <- setup only
+   │ roster: AgentPubKey -> iroh EndpointId (+ relay/direct hints), from each agent's own endpoint record
+   ▼
+kart-net (future) -> MeshSession (crates/mesh) -> MeshTransport -> moq-net / iroh (crates/mesh-iroh)
+                                                                    ├─ direct
+                                                                    └─ relay
+```
+
+Every peer publishes and subscribes over **one session per peer pair**. The lower
+`AgentPubKey` dials. A link is admitted only if its *authenticated* iroh EndpointId
+is the one the roster binds to that agent, so a successful handshake with any
+other node is refused before a session exists. No Holochain or directory call
+happens during delivery. See ARCHITECTURE.md "Game mesh and identity model
+(WP2)" for the design and the reasons behind it.
+
+```bash
+cargo test -p holochain-moq-mesh                              # types + dependency boundaries
+cargo test -p holochain-moq-mesh-iroh --test transport        # one link, both modes, both ways
+cargo test -p holochain-moq-mesh-iroh --test identity -- --test-threads=1 --nocapture
+cargo test -p holochain-moq-mesh-iroh --test mesh -- --test-threads=1 --nocapture
+cargo test --release -p holochain-moq-mesh-iroh --test mesh full_mesh -- --test-threads=1 --nocapture   # latency numbers
+```
+
+Versions (exact pins): `moq-net =0.3.10`, `moq-tokio =0.19.23` (`default-features = false`,
+`iroh`), `iroh =1.2.0`, `web-transport-iroh =0.7.0`. iroh is pinned to 1.2.0, the version
+Holochain's kitsune2 already resolves to, so no existing lockfile entry moved. The WP1
+spike ran iroh 1.3.0; the same code paths pass on 1.2.0.
+
+| Test | Result |
+|---|---|
+| 4 peers, direct and relay-only | 6 logical connections, 3 per peer, roles exactly per tie-break, kind `Direct` / `Relayed` as configured; reliable 100 objects x 12 pairs with no loss or reorder; `Latest` 30 Hz x 3 s, 0 skipped |
+| 8 peers, direct and relay-only | 28 logical connections, 7 per peer; reliable 100 x 56 pairs with no loss or reorder; `Latest` 30 Hz x 3 s, 56 pairs, 5,040 objects, 0 skipped |
+| Simultaneous dial (`BothDial`) | 10 rounds: always 1 session per side, one `PeerJoined`, the lower side refused the other link (`WrongDirection`) each round, 500 reliable objects each way with none lost; plus a 4-peer all-dial mesh with 6 connections |
+| Peer removal | dropping 1 of 4 peers: the other 3 released it in 12 ms (graceful close), emitted `PeerLeft` only for it, the subscription to it ended with an error, and the remaining links kept delivering |
+| Identity | bound id accepted (3 peers, 6 directory calls at setup, **0 during delivery**); an authenticated node claiming a bound agent with another key is refused (`NotMember`, 5 refusals) while the bound one is accepted and its data is what arrives; dialing the wrong id fails the handshake; an authenticated non-member is closed with 0x4d01 before any session; the directory refuses to rebind an EndpointId to a second agent |
+
+**Measured (loopback, one process, 20-byte objects, `Latest`, 30 Hz, all-to-all, publish->receive; release rows: ranges over 2 runs for direct, 3 for relay-only; debug row: 1 run):**
+
+| Mesh | Build | Full mesh up | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| 4 peers direct | release | 11 ms | 0.29-0.32 ms | 0.36-0.42 ms | 0.40-0.46 ms |
+| 4 peers relay-only | release | 11-12 ms | 0.32-0.43 ms | 0.46-0.58 ms | 0.52-0.70 ms |
+| 8 peers direct | release | 22 ms | 0.50-0.59 ms | 0.66-0.80 ms | 0.79-0.91 ms |
+| 8 peers relay-only | release | 23 ms | 0.63-0.66 ms | 0.79-0.90 ms | 0.87-1.01 ms |
+| 8 peers direct | debug | 189 ms | 4.7 ms | 6.3 ms | 9.0 ms |
+
+All 8 "peers" share one process and CPU, so these numbers include
+scheduling contention, which is why the debug figures are about 7x worse. They
+say nothing about Internet latency, and the relay is local.
+
+### Known limitations (WP2)
+
+- **Not tested on real networks.** Loopback and an in-process relay only; no
+  NAT traversal, no hole punching, and no relay->direct upgrade observed. The
+  WP1 manual two-network test is still outstanding.
+- **No reconnect.** A lost peer emits `PeerLeft` and stays gone (WP6).
+  Initial dialing retries up to 5 times, 200 ms apart, then emits
+  `DialFailed`. A peer that crashes without closing is released only by the
+  10 s idle timeout. That case was not measured; the removal test uses a
+  graceful close.
+- **Roster fixed at start.** No peers are added later.
+- **No per-track authorization beyond membership (WP8).** Every roster
+  member can subscribe to every track.
+- **Subscribing before the publisher has created the track is not
+  supported.** Publish first; WP3 will settle the semantics.
+- **`ReliableOrdered` keeps its whole single group** for the life of the
+  publisher (no bound, no late-joiner replay policy); `Latest` uses a
+  stream per object, and datagrams are not used. Both are WP3.
+- **The DNA does not enforce "one EndpointId per agent".** Only
+  `InMemoryPeerDirectory` does; adding the integrity rule is WP7.
+- **Both paths on loopback.** The tests use `IrohConfig::insecure_relay_tls`
+  (feature `test-utils`) to trust the self-signed local relay. Production
+  builds cannot enable it.
+- **Agent keys must be a single MoQ path segment** (no `/`), which
+  Holochain's URL-safe base64 keys are.

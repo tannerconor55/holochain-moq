@@ -42,11 +42,13 @@ These are hard constraints unless a task explicitly changes them.
 
 4. **Holochain `AgentPubKey` is the canonical application identity.**
 
-5. TLS/QUIC transport identity is separate from Holochain identity.
+5. Transport identity is separate from Holochain identity. Holochain `AgentPubKey` answers "who is this player/agent?"; the transport identity answers "which authenticated network endpoint am I connected to?". Never replace one with the other.
 
-6. Transport identity is the SHA-256 fingerprint of the complete DER X.509 certificate.
+6. Transport identity depends on the stack:
+   * realtime media stack (`crates/realtime`, quinn + `moq-transport`): the SHA-256 fingerprint of the complete DER X.509 certificate;
+   * game mesh (`crates/mesh-iroh`, iroh + `moq-net`): the iroh EndpointId (Ed25519 public key), carried as `EndpointKind::Iroh` in `PeerEndpoint`.
 
-7. Holochain identity ↔ transport identity binding is established through Holochain authorship.
+7. Holochain identity ↔ transport identity binding is established through Holochain authorship of the agent's endpoint record. A connection whose authenticated transport identity is not the one bound to the expected agent is refused, even if its handshake succeeded.
 
 8. Use Holochain's DHT; do not create a custom DHT.
 
@@ -54,7 +56,7 @@ These are hard constraints unless a task explicitly changes them.
 
 10. Prefer direct peer-to-peer transport.
 
-11. Relay/NAT traversal is a later concern.
+11. The game mesh uses iroh for direct paths with relay fallback. Real NAT traversal has **not** been tested; never describe loopback or local-relay tests as proof of it.
 
 12. Do not introduce libp2p/PeerKit unless a concrete missing capability requires it.
 
@@ -66,7 +68,7 @@ These are hard constraints unless a task explicitly changes them.
 
 16. Reuse existing media abstractions before creating parallel abstractions.
 
-17. Do not introduce a second realtime transport.
+17. Do not introduce a further realtime transport. There are exactly two, by approved decision (WP1/WP2): the existing quinn + `moq-transport` stack for media (kept as baseline and interop reference), and iroh + `moq-net` (IETF draft-16) behind `MeshTransport` for the game mesh. Game code depends on `crates/mesh` only, never on iroh, MoQ or TLS types.
 
 ## Current architecture
 
@@ -95,6 +97,18 @@ Holochain
 ```
 
 `RealtimeNode` is the bridge between peer/directory discovery and realtime transport.
+
+The game mesh (kart-online WP2) is a separate path with the same control/data split:
+
+```text
+Holochain (identity / discovery / lobby / membership / results)
+      ↓ roster: AgentPubKey → iroh EndpointId (+ dial hints), resolved at setup
+  kart-net ─▶ MeshSession (crates/mesh) ─▶ MeshTransport ─▶ moq-net / iroh (crates/mesh-iroh)
+                                                              ├─ direct
+                                                              └─ relay
+```
+
+Zero Holochain calls during steady-state mesh delivery, as for media.
 
 The realtime layer should remain usable without Holochain.
 
@@ -282,8 +296,8 @@ These are known and should not be accidentally reimplemented as part of unrelate
 * encoder pipeline introduces recovery latency
 * hostile peers can still cause `moq-transport` object buffering
 * V4L2 currently targets YUYV
-* no reconnect
-* no relay/NAT traversal
+* no reconnect (media stack: `node::reconnect` covers subscriber reconnects only; mesh: none, WP6)
+* media stack: no relay/NAT traversal; mesh: iroh relay works on loopback, real NAT traversal untested
 * no adaptive bitrate
 * no production capture-device matrix
 * no recording/persistence of media

@@ -376,7 +376,11 @@ of the kart-online design brief (section 8) and WP1's "evaluate in this order".
 
 **Option 1(b): move the data plane to moq-dev's `moq-net` over iroh, keeping
 the IETF wire dialect the existing code actually speaks (draft-16).** The move
-is **proposed, not done**: no production crate has changed. Option 1(a) is
+is **proposed, not done**: no production crate has changed.
+*Update (WP2, same day):* adopted for the **game mesh only**
+(`crates/mesh-iroh`, see "Game mesh and identity model (WP2)" below). The
+media stack in `crates/realtime` is unchanged and still runs on quinn +
+`moq-transport`. Option 1(a) is
 rejected without a fork. Option 2 (own relay and hole punching on quinn) is not
 needed, because 1(b) works.
 
@@ -536,3 +540,120 @@ Internet RTTs or the relay's behaviour under load.**
 - **Privacy (brief S6).** A direct iroh connection reveals each racer's IP
   addresses to the others in the lobby; a relayed one reveals them to the
   relay operator. The relay sees only QUIC ciphertext.
+
+## Game mesh and identity model (WP2)
+
+```text
+Holochain                      identity / discovery / lobby membership / results (durable)
+   │  setup only: each member's PeerEndpoint { agent, Endpoint { kind: Iroh, .. } }
+   ▼
+kart-net                       game networking (not built yet: WP10)
+   ▼
+MeshSession<T>                 crates/mesh: roster, tie-break, admission, one session per pair,
+   │                           TrackName / DeliveryMode / PeerStatus / MeshEvent
+   ▼
+T: MeshTransport               trait in crates/mesh
+   ▼
+IrohMeshTransport              crates/mesh-iroh: moq-net 0.3.10 (IETF draft-16) over iroh 1.2.0
+   ├─ direct UDP
+   └─ relay (iroh-relay)
+```
+
+`crates/mesh` has no transport, MoQ, TLS or Holochain dependency; `crates/mesh-iroh`
+has no Holochain dependency. Both are enforced by `crates/mesh/tests/boundaries.rs`.
+No media crate depends on either.
+
+### Two identities, one binding
+
+| | Answers | Proved by |
+|---|---|---|
+| Holochain `AgentPubKey` | "who is this player?" | Holochain source-chain signatures |
+| iroh EndpointId (Ed25519 key) | "which authenticated network endpoint is this?" | iroh's TLS handshake, which uses the raw key as the certificate |
+
+**The binding** is the agent's own endpoint record:
+
+```text
+PeerEndpoint { agent: A, endpoint: Endpoint { kind: Iroh, transport_identity: <EndpointId>, address: "relay:<url> ip:<addr>" } }
+```
+
+It is authored by A, so the DNA validates `author == agent`, exactly as for every
+other endpoint. It is optionally wrapped as an `EndpointAdvertisement` with
+`published_at`/`expires_at`, the existing Stage 13 path that already persists
+in the DNA.
+
+- *Why reuse the existing record:* the existing `PeerDirectory`,
+  `HolochainPeerDirectory`, DNA entry and expiry logic carry it unchanged.
+  The only change is one additive enum variant, so the DNA logic does not
+  change.
+- *The `address` format:* `IrohHints` (`crates/protocol/src/endpoint.rs`).
+- *What `transport_identity` holds:* for `EndpointKind::Iroh` it holds the
+  EndpointId itself, not a certificate hash.
+
+`InMemoryPeerDirectory` keys iroh ownership on the EndpointId, so a second agent
+cannot claim a key already bound to another agent. `crates/mesh-iroh::iroh_addr_for`
+refuses to choose when one agent advertises two different keys.
+
+**Rule enforced by `MeshSession`:** a link counts as agent A only if its
+*authenticated* remote key equals the key the roster binds to A. A successful
+handshake with any other valid iroh node is refused before any MoQ session exists:
+
+- on accept, the remote key is looked up in the roster. If it is not there,
+  the link is refused as `NotMember` (close code 0x4d01);
+- on dial, the transport fails the handshake if the dialed key is not
+  presented. As defence in depth, the mesh refuses `IdentityMismatch`
+  (0x4d02) if a transport ever broke that contract.
+
+The roster is resolved by the caller at setup, from the directory. The mesh
+never calls a directory or Holochain, before or during delivery.
+
+### Why
+
+- **Why not Holochain per frame:** Holochain writes are signed, validated and
+  gossiped. Per-frame use would cost seconds of latency and grow every
+  member's DHT. The control/data split (rules 1–3 in CLAUDE.md) applies to
+  game traffic exactly as to media. The tests count directory calls: none
+  happen during delivery.
+- **Why iroh is the transport identity:** iroh authenticates the key in every
+  handshake, direct or relayed, and dials by key with relay fallback. A
+  TLS-certificate pin would need its own NAT traversal and relay design.
+- **Why MoQ remains the data protocol:** tracks, groups and per-track
+  delivery semantics (latest-wins vs ordered) are exactly what game state and
+  events need. The same IETF draft-16 dialect interoperates with the
+  existing media publisher (WP1).
+
+### Session model
+
+- **One logical session per pair.** The lower agent (byte-wise order of the
+  base64 key text) dials the higher one. On accept, a link from a peer we
+  should have dialed is refused as `WrongDirection` (0x4d03), and a second
+  link for an agent that already has one is refused as `Duplicate` (0x4d04).
+  `DialPolicy::BothDial` makes both sides dial at once (simultaneous open),
+  and the same rule leaves exactly one session.
+- **Symmetric.** Each endpoint has one publish origin holding its broadcast
+  `<own agent key>`, served to every session, plus one subscribe origin per
+  session. `subscribe(peer, track)` reads only `<peer key>/<track>` and only
+  over that peer's session, so a peer cannot serve tracks under another
+  agent's name.
+- **Delivery modes (WP2 minimum).**
+  - `Latest`: one MoQ group per object. The reader skips groups older than
+    the newest delivered and keeps an 8-object drop-oldest queue.
+  - `ReliableOrdered`: one long-lived group, i.e. one QUIC stream, so objects
+    are ordered and retransmitted. The reader queue holds 1,024 objects and
+    applies backpressure rather than dropping.
+- **Lifecycle.**
+  - `PeerJoined` fires when a session is established.
+  - `PeerLeft` fires when it closes. Only that peer's session and the
+    subscriptions over it end.
+  - `ConnectionKindChanged` comes from polling the selected iroh path every
+    500 ms.
+  - `Reconnecting` is defined but never emitted (WP6).
+- **Timeouts.** QUIC idle timeout 10 s, keep-alive 4 s.
+
+### Test scopes (kept distinct on purpose)
+
+| Scope | Status |
+|---|---|
+| Loopback, direct UDP between endpoints in one process | **tested** (`crates/mesh-iroh/tests/*`) |
+| Local relay: real `iroh-relay` in-process on 127.0.0.1, IP transports removed | **tested** (4 and 8 peers) |
+| Real Internet path between two machines | **not tested** |
+| Real NAT traversal / hole punching (home router, mobile hotspot, CGNAT) | **not tested** |

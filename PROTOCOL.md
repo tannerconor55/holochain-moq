@@ -769,3 +769,22 @@ Each frame's expected key/forced status is checked against the emitted packet.
 
 **Not done**: retry of a lost request, encoder-side lower-latency keyframes, audio, reconnection,
 hostile-peer hardening beyond bounding keyframe work.
+
+## WP2: game mesh wire (iroh + moq-net)
+
+| Item | Value |
+|---|---|
+| QUIC | iroh 1.2.0 (noq), TLS with raw Ed25519 public keys; the EndpointId is the transport identity |
+| ALPN | `moqt-16` (raw QUIC, no HTTP/3) |
+| MoQ | moq-net 0.3.10, IETF moq-transport draft-16; the dialer is the MoQ client and the acceptor the server, and both publish and subscribe |
+| Broadcast | one per endpoint, named by the publisher's `AgentPubKey` base64 text |
+| Track | `<agent>/<TrackName>`; names are ASCII alnum plus `-_./`, at most 64 bytes |
+| `Latest` | one group per object, one frame per group |
+| `ReliableOrdered` | one group for the publisher's lifetime, one frame per object |
+| Refusal close codes | `0x4d01` NotMember, `0x4d02` IdentityMismatch, `0x4d03` WrongDirection, `0x4d04` Duplicate |
+| QUIC idle timeout / keep-alive | 10 s / 4 s |
+
+**Endpoint record** (`EndpointKind::Iroh`): `transport_identity.fingerprint` holds
+the 32-byte EndpointId, and `address` holds the `IrohHints` text form: space-separated
+`relay:<url>` and `ip:<socket addr>` tokens, at most 4 relays, 16 direct
+addresses and 2,048 bytes. Game payload framing is not defined yet (WP3).
