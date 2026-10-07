@@ -787,3 +787,83 @@ is not included.
   could still flood a reader's queue, which stays bounded, or open
   subscriptions to tracks that never exist; those queue in moq-net's
   `Dynamic` and are unbounded per hostile peer.
+
+## Clock synchronisation and race start (WP4)
+
+```text
+game / kart-net (future)        RaceClock::host_now / local_from_host / wait_until(start) -> StartOutcome
+        ▼                       ClockStatus { offset, rtt, best_rtt, spread, jitter, error_bound, samples, quality, degraded, kind }
+holochain-moq-clock             ClockSampler (peers) / ClockResponder (host) over Latest clock tracks,
+        ▼                       robust estimator, typed LocalTime / HostTime / OffsetToHost
+holochain-moq-mesh              (transport-neutral; clock never sees iroh, MoQ, TLS or Holochain)
+```
+
+The clock layer depends on `mesh` only (`crates/mesh/tests/boundaries.rs`).
+
+- **Clock messages live in `crates/clock`, not in `kart-wire`.** Clock sync is reusable
+  beyond karting, and `kart-wire` is game payloads.
+- **The race start reuses kart-wire's existing `RaceStart` event.** Its `start_at_ms` is
+  now defined as host time in ms. The format is unchanged.
+- **No Holochain call is involved** in sampling or starting.
+
+### Why this estimator
+
+- **Why not an average.** The NTP bound (true offset within `offset ± rtt/2`) means a
+  sample is only as good as its RTT is small. WP3 measured relay head-of-line stalls of
+  hundreds of ms, and a stalled sample is both large-RTT and asymmetric, so averaging it
+  in drags the estimate. The brief's own example (five ~40 ms samples at +11..+14, one
+  310 ms at +92) gives a mean of +25.7 ms; the estimator gives +12 ms.
+- **The keep window.** Keep `rtt <= best + max(2 ms, 50 % of best)`:
+  - the relative part absorbs ordinary jitter on real paths;
+  - the 2 ms floor stops sub-millisecond loopback scheduling noise from discarding
+    nearly everything.
+- **Median, not the single best sample**, so one lucky low-RTT sample with an odd offset
+  can't dominate (tested).
+
+### What the test matrix found, and the fixes
+
+Each was found by a failing run, not by inspection.
+
+1. **Shared reply track.** One shared pong track lost ~25 % of samples at 8 peers. The
+   host now replies on a per-peer track.
+2. **Warm-up.** Under loss, subscription setup can stall (QUIC retransmit back-off), and
+   datagrams sent before it are dropped. Pings before the first pong are now warm-up.
+3. **Degraded estimates.** On a lossy relay, almost every sample can be stalled. Padding
+   the median with the next-lowest-RTT samples produced a −54 ms error (8 peers, 5 %
+   netem). A degraded estimate now uses only in-window samples.
+4. **Adaptive sampling.** It keeps sampling until the estimate's bound is ≤ 10 ms. A
+   wake-up bug (`sent < samples` instead of `< target`) first stalled the extra rounds
+   until the deadline; that is fixed.
+
+### Measured (loopback; injected clock skews +0, +37, −82, +143, −25, +61, −110, +7 ms)
+
+Start spread is the spread of the **real instants** at which all peers fired. All peers
+share one process, so one `Instant` timeline is ground truth.
+
+Across all four topology runs (2× debug, 1× release) of direct and relay-only, 4 and 8
+peers, at 0/2/5 % netem:
+- worst start spread **1.12 ms** (release: 0.15 ms);
+- worst offset error **0.39 ms**;
+- every estimate within its own error bound.
+
+Release numbers are in the README table. This says nothing about a real Internet path.
+
+### Known limitations (WP4)
+
+- **Validated only on loopback / a local in-process relay, with simulated clock skew**
+  (deliberately skewed clocks in one process) and uniform netem loss. No remote network,
+  real NAT, or two-machine test has been run.
+- **No clock drift.** Skew is a constant offset; frequency drift between real crystals
+  (typically 10–20 ppm, i.e. ~2–4 ms over a 3-minute race) is not modelled or
+  corrected. Re-syncing before each race is the mitigation; there is no slewing.
+- **Asymmetric paths are bounded, not corrected.** The estimate is exact only for
+  symmetric paths. The reported error bound covers any asymmetry, and on real access
+  networks (asymmetric up/down) the actual error can approach it.
+- **Relay head-of-line blocking (WP3) is not solved.** The estimator only keeps stalled
+  samples from poisoning the estimate. On a lossy relay a sync takes longer (up to
+  ~3.6 s measured) and `RaceStart` itself can take hundreds of ms to arrive (215 ms
+  measured), which the default 3 s lead absorbs.
+- **The responder covers only peers connected when it starts.** A late joiner needs a new
+  responder (reconnect is WP6). Who may act as host is not checked (WP5/WP8).
+- **The host does not yet collect peers' clock quality before starting.** A game layer
+  should not start while any peer reports `Poor` or failed (WP10).

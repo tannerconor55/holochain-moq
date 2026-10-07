@@ -889,3 +889,89 @@ would only cost bandwidth. The publisher is the track's source, not a field.
   re-encodes to the same bytes.
 - Sanity checks beyond the format (speed limits, lap jumps, event authority, rate
   limits) are game/hardening work (brief S4, WP9), not the decoder's.
+
+## WP4: clock synchronisation and race start (`crates/clock`)
+
+### Clock model and sign convention
+
+```text
+host_time = local_time + offset_to_host        (the only convention; positive = host clock ahead)
+local_time = host_time - offset_to_host
+```
+
+- Every peer reads its own **local monotonic clock**: microseconds since that clock was
+  created. It never jumps and is never corrected. The system wall clock is neither read
+  nor changed.
+- "Host time" is a reading of the **host's** local monotonic clock. It is not wall-clock
+  or UTC time.
+- In code, `LocalTime`, `HostTime` and `OffsetToHost` are distinct types. The only
+  conversions are `OffsetToHost::to_host` and `to_local`, so applying the offset in the
+  wrong direction does not type-check. A test also catches it end to end: an inverted
+  offset fires 164 ms off.
+
+### Tracks (`Latest`, both directions)
+
+| Track | Publisher | Carries |
+|---|---|---|
+| `race/<race>/<peer>/clock` | each non-host peer | `ClockPing` |
+| `race/<race>/<host>/clock/<peer>` | host, one per peer | `ClockPong` for that peer |
+
+A clock sample is disposable: a lost or late one is simply missing and never blocks a
+newer one. Per-peer reply tracks keep one peer's pongs from crowding another's 4-deep
+`Latest` queue. A shared track lost about 25 % of samples at 8 peers. Requires
+`clock/<agent>` ≤ 64 bytes; a real Holochain key is 53 characters.
+
+### Messages, version 1 (big-endian, fixed length)
+
+| Offset | `ClockPing` (22 B) | `ClockPong` (38 B) |
+|---|---|---|
+| 0 | `version` u8 = 1 | `version` u8 = 1 |
+| 1 | `type` u8 = 1 | `type` u8 = 2 |
+| 2 | `nonce` u64 (random per sampler) | `nonce` u64 (echoed) |
+| 10 | `seq` u32 | `seq` u32 (echoed) |
+| 14 | `t0` u64 µs, sender's clock | `t0` u64 (echoed) |
+| 22 | — | `t1` u64 µs, host's clock at receipt |
+| 30 | — | `t2` u64 µs, host's clock just before sending |
+
+Rejected on decode:
+- an unknown `version` or `type` (0 and 3–255 are not defined; unlike kart events there is
+  no forward-compatible "unknown" type, so the receiver counts it as malformed);
+- any length other than 22 or 38 for the given type;
+- any timestamp above 2^62;
+- a pong with `t2 < t1`.
+
+A sampler accepts a pong only if its `nonce` is its own, its `seq` is still pending, and
+its `t0` is the one sent. Anything else is counted, not used: `duplicates` (seq already
+answered), `stale` (timed out, or wrong `t0`), `pongs_for_others`, `malformed`.
+A sample with negative RTT is discarded.
+
+### Sample, estimate, start
+
+- **Sample:** `rtt = (t3 - t0) - (t2 - t1)`, `offset = ((t1 - t0) + (t2 - t3)) / 2`.
+  For any path asymmetry, the true offset lies within `offset ± rtt / 2`.
+- **Estimate:**
+  1. Keep samples with `rtt <= best_rtt + max(2 ms, 0.5 × best_rtt)`.
+  2. The offset is the **median** of the kept samples' offsets.
+  3. The error bound is the largest kept RTT / 2.
+  4. If fewer than 5 samples are kept but at least 5 were collected, use the kept ones
+     anyway and flag the estimate `degraded`. With fewer than 5 collected it is an error.
+- **Sampling** (`SyncConfig` defaults):
+  - 16 pings, 50 ms apart.
+  - Pings sent before the first pong are warm-up and don't count, since the path isn't
+    proven live yet.
+  - More rounds of 8, up to 96 pings or 10 s, until the estimate is not degraded and its
+    bound is ≤ 10 ms.
+  - Each ping times out after 1 s; samples with RTT > 1 s are dropped.
+- **Failure:** the result is never a zero or made-up offset. It is an `ClockError`:
+  - `NoResponse` (nothing answered);
+  - `TooFewSamples`;
+  - `PeerLost` (the host's session or track ended);
+  - `Mesh`.
+
+  Or it is an estimate whose `error_bound_us`, `ClockQuality` (`Good` ≤ 5 ms, `Fair`
+  ≤ 15 ms, `Poor` otherwise) and `degraded` flag say how far to trust it.
+- **RaceStart:** kart-wire `EventBody::RaceStart.start_at_ms` is a **host time in ms** (the
+  host's monotonic clock). The host sets it to `host_now + lead`, where
+  `StartConfig::lead` defaults to 3 s. Each peer waits until its local clock reads
+  `start_at - offset_to_host`. If that moment has already passed, `wait_until` returns
+  `StartOutcome::Late { by }` and the late start is never hidden.

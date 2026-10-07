@@ -27,6 +27,7 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP1 spike | Transport decision for kart online: MoQ over iroh (direct + relay) | **spike done, decision proposed** - `prototypes/wp1-iroh-spike` (own workspace), ARCHITECTURE.md "Transport decision (WP1 spike)". Loopback only; **no NAT / real-network test run**; media crates unchanged; adopted for the game mesh in WP2 |
 | WP2 | Symmetric game mesh: `MeshSession` over `MeshTransport`, iroh + moq-net (draft-16), AgentPubKey <-> iroh EndpointId binding | **done, tested on loopback + local relay** - `crates/mesh`, `crates/mesh-iroh`. **No real-network / NAT test run**; no reconnect (WP6) |
 | WP3 | Game delivery contracts (`Latest` over MoQ datagrams, bounded `ReliableOrdered` with replay), `kart-wire` v1 format, loss/latency/bandwidth/CPU measurements | **done, tested locally** (loopback direct, local relay, kernel netem loss in a private network namespace) - `crates/kart-wire`, `crates/mesh-iroh` (`tests/delivery.rs`, `examples/mesh_bench.rs`). **Not tested over the Internet or through NAT** |
+| WP4 | Host-relative clock estimation (NTP 4-timestamp samples over `Latest`, robust estimator) and race-start scheduling | **done, tested locally** (loopback direct, local relay, netem 2/5 %, simulated clock skew) - `crates/clock`. **Not validated on a real network** |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before
@@ -922,3 +923,56 @@ packets). See ARCHITECTURE.md "Known limitations (WP3)".
 - **No pacing or congestion adaptation.** Bursts are shed: 16,644 of 100,000 burst objects reached the subscriber, which held at most 4.
 - **No reconnect (WP6), authorization (WP8), or hostile-peer rate limits (WP9).** Subscriptions to never-published tracks queue in moq-net without a bound.
 - **Untested:** CPU and RSS are per-process figures from `/proc` (Linux only) and not heap-profiled; JavaScript decoding of the golden vectors is not tested yet.
+
+## WP4: clock synchronisation and race start
+
+```text
+host_time = local_time + offset_to_host    (positive = host ahead; typed so it cannot be applied backwards)
+peer: ClockPing on race/<r>/<peer>/clock  ->  host: ClockPong on race/<r>/<host>/clock/<peer>   (Latest)
+estimate: keep rtt <= best + max(2 ms, 50 %), median offset, error bound = max kept rtt / 2
+start:    host sends RaceStart{start_at_ms = host_now + 3 s}; peer waits until local = start - offset
+```
+
+```bash
+cargo test -p holochain-moq-clock                                         # unit, wire, matrix (needs userns + tc for netem)
+cargo test --release -p holochain-moq-clock -- --test-threads=1 --nocapture   # the numbers below
+```
+
+**WP4 has only been validated on loopback / a local relay with simulated clock skew.**
+No real remote network, NAT, or two-machine test has been run. Skews injected: +0
+(host), +37, −82, +143, −25, +61, −110, +7 ms. All peers share one process, so the
+fired instants are measured on one timeline. 30 Hz kart state runs all-to-all
+throughout. Release build, one run:
+
+| Topology | netem | Sync time | Samples kept / matched (lost) | Worst offset error | RaceStart arrival (max) | **Start spread** | Min state rate |
+|---|---|---|---|---|---|---|---|
+| direct, 4 | 0 % | 802 ms | 51/51 (0) | 0.040 ms | 0.2 ms | **0.034 ms** | 30.00 Hz |
+| direct, 8 | 0 % | 801 ms | 119/119 (0) | 0.031 ms | 0.2 ms | **0.051 ms** | 29.80 Hz |
+| relay-only, 4 | 0 % | 801 ms | 51/51 (0) | 0.043 ms | 0.3 ms | **0.055 ms** | 29.80 Hz |
+| relay-only, 8 | 0 % | 802 ms | 119/119 (0) | 0.052 ms | 0.3 ms | **0.068 ms** | 29.80 Hz |
+| direct, 4 | 2 % | 1402 ms | 49/49 (2) | 0.032 ms | 0.2 ms | **0.045 ms** | 28.77 Hz |
+| direct, 8 | 2 % | 1802 ms | 114/114 (6) | 0.049 ms | 0.2 ms | **0.117 ms** | 28.85 Hz |
+| direct, 4 | 5 % | 1003 ms | 51/51 (1) | 0.041 ms | 0.4 ms | **0.034 ms** | 27.93 Hz |
+| direct, 8 | 5 % | 1753 ms | 112/112 (13) | 0.032 ms | 13.3 ms | **0.087 ms** | 27.53 Hz |
+| relay-only, 4 | 2 % | 1103 ms | 42/50 (1) | 0.043 ms | 0.5 ms | **0.151 ms** | 28.89 Hz |
+| relay-only, 8 | 2 % | 1003 ms | 102/119 (1) | 0.043 ms | 0.3 ms | **0.104 ms** | 28.87 Hz |
+| relay-only, 4 | 5 % | 2583 ms | 25/62 (18), 2 extra rounds | 0.033 ms | 8.9 ms | **0.059 ms** | 26.23 Hz |
+| relay-only, 8 | 5 % | 3554 ms | 56/163 (44), 9 extra rounds | 0.036 ms | 215.9 ms | **0.065 ms** | 26.18 Hz |
+
+The worst start spread over all recorded runs (2× debug + 1× release, every row) was
+**1.12 ms** against the **±20 ms** target. The state rates under netem are lower because of
+the injected loss itself (WP3), not the clock traffic.
+
+**Cost.** Clock application payload is ≈1.0 KB per peer per sync (1.5 KB in the worst
+lossy relay case): 16+ pings × 22 B + pongs × 38 B, over ~0.8–3.6 s. With ~71 B of
+QUIC/MoQ/IP/UDP overhead per datagram (WP3) that is roughly 3–5 KB on the wire per peer per
+sync, against 43 KB/s of game traffic. CPU above the 30 Hz baseline during sync was
+0–59 ms for the whole 8-peer process in release, which is at noise level.
+
+### Known limitations (WP4)
+
+- **Loopback, local relay, simulated skew and uniform netem only.** No real Internet path, NAT, or separate machines.
+- **No clock-drift modelling or slewing.** Re-sync before each race.
+- **Asymmetric paths are bounded (`error_bound`), not corrected.**
+- **Relay TCP head-of-line blocking (WP3) remains.** It lengthens sync (≤3.6 s measured) and `RaceStart` delivery (≤216 ms measured), and is absorbed by the 3 s default lead, not fixed.
+- **The responder covers peers connected at its start.** The host does not yet gather peers' clock quality before starting (WP10).
