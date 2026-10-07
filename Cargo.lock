@@ -1075,6 +1075,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
+]
+
+[[package]]
 name = "corosensei"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3021,6 +3032,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-mesh-iroh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "holochain-moq-mesh",
+ "holochain-moq-mesh-iroh",
+ "holochain-moq-protocol",
+ "iroh",
+ "moq-net",
+ "moq-tokio",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "web-transport-iroh",
+]
+
+[[package]]
 name = "holochain-moq-mic-alsa"
 version = "0.1.0"
 dependencies = [
@@ -3799,6 +3829,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4145,6 +4181,7 @@ version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2f8d1cfffc83efe39a1031aab423ce09cb8048071baba550508931e9a81ce46"
 dependencies = [
+ "axum",
  "backon",
  "blake3",
  "bytes",
@@ -4178,6 +4215,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde",
+ "simple-dns",
  "smallvec",
  "strum 0.28.0",
  "time",
@@ -4509,6 +4547,26 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kio"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3033155c4fffcd86959a9ebdfbcadbed7ec4bfcc2fb545469778f791adf704eb"
+dependencies = [
+ "loom",
+ "smallvec",
+]
+
+[[package]]
+name = "kio"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b9d7b486bef9fdee1330ed216e35e8a170f840d407ccb20b5eb194af3d01a5"
+dependencies = [
+ "loom",
+ "smallvec",
 ]
 
 [[package]]
@@ -4905,6 +4963,7 @@ checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
 dependencies = [
  "cfg-if",
  "generator",
+ "pin-utils",
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
@@ -5167,6 +5226,85 @@ dependencies = [
  "web-transport",
  "web-transport-quinn",
  "webpki",
+]
+
+[[package]]
+name = "moq-net"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df2c0eead236aa876f1347b5e313b4ff3d9c849812fee084b23ebc2253f13ee5"
+dependencies = [
+ "arrayvec",
+ "bytes",
+ "futures",
+ "kio 0.6.2",
+ "moq-pattern",
+ "num_enum",
+ "rand 0.10.2",
+ "serde",
+ "slab",
+ "thiserror 2.0.20",
+ "tracing",
+ "web-async",
+ "web-transport-trait 0.4.0",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fc361de827f05fa2a1dfb6489cb73575a16ed5c56f3b1d218be9925176c7521"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "moq-sock"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9dd03d6d2fd40a66e2b9f8e35dd31137694b0fd41b5652e97b56aa03705b29"
+dependencies = [
+ "core_affinity",
+ "libc",
+ "rand 0.10.2",
+ "socket2 0.6.3",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "moq-tokio"
+version = "0.19.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dabaa6b7658d7eee293c38c19481f01e74e9bd1b9059b08501880bd43f29b7a"
+dependencies = [
+ "bytes",
+ "futures",
+ "hex",
+ "humantime",
+ "jni 0.22.4",
+ "libc",
+ "moq-net",
+ "moq-sock",
+ "noq-proto",
+ "rand 0.10.2",
+ "rustls",
+ "rustls-platform-verifier 0.7.0",
+ "serde",
+ "serde_with",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "usage-rs",
+ "web-transport-iroh",
+ "web-transport-proto",
+ "web-transport-trait 0.4.0",
+ "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]
@@ -9223,6 +9361,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "usage-argv"
+version = "6.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95e0e816704b1c059bade81820deb21681403e303b7b1b43f7d103ccca52a561"
+
+[[package]]
+name = "usage-config"
+version = "6.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f058d1d0e7bc05309ea73e67c63000fd9d10c9755fd25e8f13f8833e3c937146"
+
+[[package]]
+name = "usage-derive"
+version = "6.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9449158af608b02af78037717ff5e4a36a9f2c82dbadcff7e5fd2e2d84df959d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+ "toml",
+]
+
+[[package]]
+name = "usage-rs"
+version = "6.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c296fe5806b82d0d80374bb56ccd31cd9fe5c49b4b0e5683de6231416bd976d"
+dependencies = [
+ "usage-argv",
+ "usage-config",
+ "usage-derive",
+]
+
+[[package]]
 name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9656,6 +9829,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtimer"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
+dependencies = [
+ "futures",
+ "js-sys",
+ "parking_lot",
+ "pin-utils",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "wast"
 version = "259.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9675,6 +9861,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6eec44b0c80391b20fb7ad9ea440c72c5d382385bdf74444bb18321c425017e"
 dependencies = [
  "wast",
+]
+
+[[package]]
+name = "web-async"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ba1426dcf56093a94d9415ba4c016e45c1323679501e7309f1919ab32f08206"
+dependencies = [
+ "tokio",
+ "tracing",
+ "wasm-bindgen-futures",
+ "wasmtimer",
 ]
 
 [[package]]
@@ -9723,6 +9921,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-transport-iroh"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14c292c05ff2f4df8e582244a6a5f2ba89f4c13b1170ec5f59a727f9a4624baf"
+dependencies = [
+ "bytes",
+ "http",
+ "iroh",
+ "kio 0.5.9",
+ "n0-error",
+ "n0-future",
+ "tokio",
+ "tracing",
+ "url",
+ "web-transport-proto",
+ "web-transport-trait 0.4.0",
+]
+
+[[package]]
 name = "web-transport-proto"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9753,7 +9970,7 @@ dependencies = [
  "tracing",
  "url",
  "web-transport-proto",
- "web-transport-trait",
+ "web-transport-trait 0.3.7",
 ]
 
 [[package]]
@@ -9761,6 +9978,15 @@ name = "web-transport-trait"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6394e09415ddc1e7c88d605443a3d2f333bf278f74c17020a2b6c44e97507883"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
+name = "web-transport-trait"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a916df726e858e8e6cc21e852129f59e6277d3a01bb2254c0506dcf829fdd5d"
 dependencies = [
  "bytes",
 ]

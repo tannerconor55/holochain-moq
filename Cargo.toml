@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/protocol",
     "crates/mesh",
+    "crates/mesh-iroh",
     "crates/realtime",
     "crates/node",
     "crates/hdk-bridge",
@@ -45,6 +46,13 @@ moq-transport = "0.16.2"
 moq-native-ietf = "0.10.0"
 web-transport = "0.10"
 quinn = "0.11"
+# --- mesh transport (WP2): moq-dev MoQ over iroh. Exact pins on purpose. ---
+# iroh =1.2.0 is the version Holochain's kitsune2 already resolves to in this
+# lockfile, so the conductor's networking stack is not moved by this crate.
+moq-net = "=0.3.10"
+moq-tokio = { version = "=0.19.23", default-features = false, features = ["iroh"] }
+iroh = "=1.2.0"
+web-transport-iroh = "=0.7.0"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.14"
 url = "2"
@@ -76,6 +84,7 @@ holochain-moq-protocol = { path = "crates/protocol" }
 holochain-moq-realtime = { path = "crates/realtime" }
 holochain-moq-node = { path = "crates/node" }
 holochain-moq-mesh = { path = "crates/mesh" }
+holochain-moq-mesh-iroh = { path = "crates/mesh-iroh" }
 holochain-moq-hdk-bridge = { path = "crates/hdk-bridge" }
 holochain-moq-codec-av1 = { path = "crates/codec-av1" }
 holochain-moq-video = { path = "crates/video" }

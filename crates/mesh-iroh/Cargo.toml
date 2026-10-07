@@ -1,0 +1,33 @@
+[package]
+name = "holochain-moq-mesh-iroh"
+description = "MeshTransport over iroh (direct + relay) carrying MoQ (moq-net, IETF draft-16). The only crate that knows iroh or moq-net."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Lets tests trust the self-signed in-process iroh-relay (IrohConfig::insecure_relay_tls).
+# Never enabled by a production build.
+test-utils = ["iroh/test-utils"]
+
+[dependencies]
+holochain-moq-mesh = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+# Pinned exactly: the moq-dev family renames/deprecates crates and skews trait
+# versions between releases (ARCHITECTURE.md "Transport decision (WP1 spike)").
+moq-net = { workspace = true }
+moq-tokio = { workspace = true }
+iroh = { workspace = true }
+web-transport-iroh = { workspace = true }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+# In-process iroh-relay for the relay-only tests, and insecure_relay_tls.
+holochain-moq-mesh-iroh = { path = ".", features = ["test-utils"] }
+iroh = { workspace = true, features = ["test-utils"] }
+tracing-subscriber = { workspace = true }
