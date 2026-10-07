@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>14H.4 WebCodecs/AV1 prototype</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  canvas { border: 1px solid #888; image-rendering: pixelated; }
+  pre { background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+  .ok { color: #0a7a0a; }
+  .fail { color: #b00; }
+  button { font: inherit; padding: 6px 12px; margin: 4px 4px 4px 0; }
+</style>
+</head>
+<body>
+<h1>14H.4 &mdash; WebCodecs / AV1 prototype</h1>
+<p>
+  Proves only one thing: can this project's real, unmodified AV1 access-unit bytes
+  (produced by the actual <code>Av1Source</code> encoder, header stripped) be decoded by
+  the browser's own <code>VideoDecoder</code>? See <code>README.md</code> in this
+  directory for the full experiment list. Nothing here is production code.
+</p>
+<button id="run">Run experiments</button>
+<canvas id="canvas" width="64" height="48"></canvas>
+<h2>Report</h2>
+<pre id="report">(not run yet)</pre>
+<script src="app.js"></script>
+</body>
+</html>

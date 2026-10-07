@@ -1,0 +1,35 @@
+[package]
+name = "holochain-moq-e2e"
+description = "Test-only crate: sweettest DNA tests and the two-conductor Holochain -> MoQ end-to-end tests. Nothing here is a library."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+holochain-moq-protocol = { workspace = true }
+holochain-moq-realtime = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-codec-av1 = { workspace = true }
+holochain-moq-video = { workspace = true }
+holochain-moq-audio = { workspace = true }
+holochain-moq-codec-opus = { workspace = true }
+holochain-moq-audio-transport = { workspace = true }
+holochain-moq-screenshare = { path = "../screenshare" }
+holochain-moq-screen-linux = { workspace = true }
+holochain-moq-video-file = { workspace = true }
+holochain-moq-playback = { workspace = true }
+# Stage 15.2: the App layer app-web wraps, driven here over real conductors.
+holochain-moq-app = { workspace = true }
+holochain = { version = "=0.7.0", default-features = false, features = ["sweettest", "wasmer-sys-cranelift"] }
+holochain_client = "=0.9.0"
+holo_hash = "=0.7.0"
+holochain_types = "=0.7.0"
+holochain_serialized_bytes = "0.0.57"
+tokio = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "holochain-moq-camera-v4l"
+description = "The one real camera backend: Video4Linux2 (Linux). Implements holochain_moq_video::VideoFrameSource. Knows nothing about codecs, MoQ or Holochain."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-video = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# V4L2 is a Linux kernel API; on other platforms this crate compiles to an
+# empty shell (no backend).
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = { version = "=0.14.0", default-features = false, features = ["v4l2"] }
+
+[dev-dependencies]
+holochain-moq-codec-av1 = { workspace = true }
+holochain-moq-realtime = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+url = { workspace = true }

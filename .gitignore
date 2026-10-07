@@ -1,0 +1,28 @@
+# Rust build output
+target/
+
+# Holochain local/runtime state
+.hc
+.hc_live_*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+
+# VS Code local settings
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+# Python
+__pycache__/
+*.py[cod]
+
+# Local development TLS certificates / private keys
+*.key
+# Local development certificates
+dev/certs/
+crates/screenshare/scripts/browser/dev/certs/

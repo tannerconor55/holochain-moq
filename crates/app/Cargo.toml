@@ -1,0 +1,42 @@
+[package]
+name = "holochain-moq-app"
+description = "Stage 14G.1: a persistent, stateful application shell over the existing screenshare/node/hdk-bridge orchestration layers - a thin CLI/REPL, not a second implementation of discovery, session validation, admission, reconnect, QUIC/MoQ or media."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "holochain-moq-app"
+path = "src/main.rs"
+
+[dependencies]
+holochain-moq-protocol = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-screenshare = { workspace = true }
+holochain-moq-av-reconnect = { workspace = true }
+# For the `LiveStats` value `screenshare::Sharer::stats()` already returns: a read-only
+# view type meant for exactly this (a UI displaying live progress), not a dependency on
+# QUIC/MoQ/admission internals - `crates/app` never calls `holochain_moq_realtime` itself.
+holochain-moq-realtime = { workspace = true }
+# For the two existing video sources `screenshare`'s own CLI already offers (screen,
+# synthetic) - constructing one is the shell's job, exactly as `screenshare::main.rs`
+# already does; encoding/publishing them stays in `Sharer`/`screenshare`.
+holochain-moq-video = { workspace = true }
+holochain-moq-screen-linux = { workspace = true }
+holochain-moq-codec-av1 = { workspace = true }
+# For the `VideoSink` trait bound `App::start_watch` is generic over - the existing
+# decoded-media boundary `screenshare::ProgressSink`/`LumaDisplaySink` already implement;
+# `crates/app` never touches a frame itself.
+holochain-moq-playback = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+# Stage 15.2 tests: real Ed25519 keys in real Holochain agent-key format.
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = "0.22"

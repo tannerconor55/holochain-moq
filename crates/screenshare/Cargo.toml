@@ -1,0 +1,48 @@
+[package]
+name = "holochain-moq-screenshare"
+description = "A 1-to-1 peer-to-peer screen-sharing application over the existing stack: a screen is just another VideoFrameSource, published as AV1 over MoQ/QUIC; the viewer discovers the sharer through a PeerDirectory (Holochain) and plays it through the existing reconnecting video half."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "screenshare"
+path = "src/main.rs"
+
+# Stage 17A: the repeatable media-path benchmark (measurement only).
+[[bin]]
+name = "media-bench"
+path = "src/bin/media_bench.rs"
+
+# Stage 17E: the CPU AV1 encoder comparison harness (measurement only).
+[[bin]]
+name = "av1-cpu-bench"
+path = "src/bin/av1_cpu_bench.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+holochain-moq-realtime = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-codec-av1 = { workspace = true }
+holochain-moq-video = { workspace = true }
+holochain-moq-av-reconnect = { workspace = true }
+holochain-moq-playback = { workspace = true }
+holochain-moq-media-timeline = { workspace = true }
+holochain-moq-screen-linux = { workspace = true }
+holochain-moq-video-file = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+# Test-only: a real Ed25519 admission proof against `Sharer::bind_with_allowed`,
+# without a Holochain conductor (`crates/holochain-e2e` covers the real one).
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = "0.22"

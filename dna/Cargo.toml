@@ -1,0 +1,20 @@
+# Holochain DNA workspace (wasm32-unknown-unknown zomes). Deliberately a
+# separate Cargo workspace from the native workspace at the repo root: zomes
+# build for a different target with different flags. See PROTOCOL.md.
+[workspace]
+resolver = "2"
+members = ["integrity", "coordinator"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+hdi = "=0.8.0"
+hdk = "=0.7.0"
+serde = "1"
+holochain-moq-protocol = { path = "../crates/protocol" }
+
+[profile.release]
+opt-level = "z"
+lto = true

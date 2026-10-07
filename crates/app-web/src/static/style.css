@@ -1,0 +1,662 @@
+/* Holochain MoQ - the local browser workspace (Stage 17H).
+ *
+ * One small design system in plain CSS: colour and spacing tokens, then components, then the
+ * responsive and accessibility layers. Every colour pair used for text or for a control boundary
+ * is checked against WCAG AA by `style.test.js`, which reads the tokens below - change a token
+ * and that test says whether the pair still works.
+ *
+ * State is never carried by colour alone: every status has an icon and words as well as a tone.
+ */
+
+/* ---- tokens -------------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f5f4f0;
+  --surface: #ffffff;
+  --surface-2: #ecebe6;
+  --text: #1c1c20;
+  --text-muted: #585860;
+  /* A control's own boundary (inputs, unselected choices): 3:1 against the surface it sits on. */
+  --border-strong: #8c8a82;
+  /* Purely decorative separators only. */
+  --border-soft: #d9d7cf;
+
+  --accent: #1d5cb8;
+  --accent-text: #ffffff;
+  --focus: #0b4fb3;
+
+  --ok-fg: #1b6a32;
+  --ok-bg: #e5f3e9;
+  --warn-fg: #874900;
+  --warn-bg: #fdf0dc;
+  --error-fg: #a8231b;
+  --error-bg: #fce9e7;
+  --info-fg: #3d3d45;
+  --info-bg: #ecebe6;
+
+  --danger: #b3261e;
+  --danger-text: #ffffff;
+
+  /* The video stage is dark in both schemes: the picture is the content. */
+  --stage: #000000;
+  --stage-text: #ffffff;
+
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --s7: 3rem;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --tap: 2.75rem; /* 44px: the minimum comfortable touch target */
+  --content: 46rem; /* the measure for forms and lists */
+  --wide: 75rem; /* the video stage may use this much */
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121316;
+    --surface: #1b1c20;
+    --surface-2: #25262b;
+    --text: #ececf0;
+    --text-muted: #a9aab3;
+    --border-strong: #767780;
+    --border-soft: #33343a;
+
+    --accent: #8ab4ff;
+    --accent-text: #0a1a33;
+    --focus: #a9c8ff;
+
+    --ok-fg: #7fdc9b;
+    --ok-bg: #16301f;
+    --warn-fg: #ffb95c;
+    --warn-bg: #33240c;
+    --error-fg: #ff9a90;
+    --error-bg: #3a1815;
+    --info-fg: #c4c5cd;
+    --info-bg: #25262b;
+
+    --danger: #ff8a80;
+    --danger-text: #2a0805;
+  }
+}
+
+/* ---- base ---------------------------------------------------------------------------------- */
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3, p { margin: 0; }
+h2 { font-size: 1.35rem; line-height: 1.25; }
+h3 { font-size: 1.05rem; line-height: 1.3; }
+
+.hidden { display: none !important; }
+
+/* The icon sprite: present in the document, never on screen. */
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.muted { color: var(--text-muted); }
+.hint { margin-top: var(--s2); font-size: 0.875rem; color: var(--text-muted); }
+.mono { font-family: var(--mono); font-size: 0.9em; overflow-wrap: anywhere; }
+
+/* Keyboard focus is always visible, and is a real indicator (not just a colour change). The one
+   exception is a container that only ever receives focus from the page itself (the skip-link target,
+   and after a session ends): a box around the whole page would say nothing and only distract. */
+main:focus-visible { outline: none; }
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--s3);
+  top: -4rem;
+  z-index: 10;
+  padding: var(--s2) var(--s4);
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--focus);
+  border-radius: var(--radius-sm);
+}
+.skip-link:focus { top: var(--s3); }
+
+/* ---- top bar ------------------------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3) var(--s5);
+  padding: var(--s3) var(--s5);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.brand { display: flex; align-items: center; gap: var(--s2); }
+.brand h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: 0.01em; }
+.brand .icon { width: 1.6em; height: 1.6em; color: var(--accent); }
+
+.tabs { display: flex; gap: var(--s1); }
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--tap);
+  padding: 0 var(--s4);
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+}
+.tab:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+/* The current view is bold and underlined - not just a different colour. */
+.tab[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+.tab:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.identity {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+.identity > span:first-child { flex: none; }
+/* The full key stays in the text (selectable and copyable) but never wraps the bar. */
+.identity .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+
+/* ---- status strip -------------------------------------------------------------------------- */
+
+.statusbar { padding: 0 var(--s5); background: var(--bg); }
+
+.headline {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  /* Lines up with the content below: the same measure as `main`, minus its own side padding. */
+  max-width: calc(var(--wide) - 2 * var(--s5));
+  margin: var(--s4) auto 0;
+  padding: var(--s3) var(--s4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+.headline-label { flex: none; }
+.headline-detail { font-weight: 400; overflow-wrap: anywhere; }
+.headline .icon { margin-top: 0.15em; }
+
+.tone-ok { color: var(--ok-fg); background: var(--ok-bg); }
+.tone-info { color: var(--info-fg); background: var(--info-bg); }
+.tone-warn { color: var(--warn-fg); background: var(--warn-bg); }
+.tone-error { color: var(--error-fg); background: var(--error-bg); }
+/* Body text inside a toned strip stays readable in the strip's own foreground. */
+
+/* ---- layout -------------------------------------------------------------------------------- */
+
+main {
+  display: block;
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding: var(--s5);
+}
+
+.panel { max-width: var(--content); }
+.panel-wide { max-width: none; }
+.panel > * + * { margin-top: var(--s4); }
+.panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); }
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  max-width: var(--content);
+  margin-bottom: var(--s4);
+  padding: var(--s3) var(--s4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+}
+.banner .icon { margin-top: 0.15em; }
+.banner-error { color: var(--error-fg); background: var(--error-bg); }
+.banner-notice { color: var(--info-fg); background: var(--info-bg); }
+.banner-body { min-width: 0; overflow-wrap: anywhere; }
+.banner-actions { margin-top: var(--s2); }
+
+/* ---- buttons ------------------------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  min-height: var(--tap);
+  padding: 0 var(--s5);
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btn-secondary {
+  color: var(--text);
+  background: transparent;
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--surface-2); filter: none; }
+
+.btn-danger {
+  color: var(--danger-text);
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* A segmented control (Fit/Fill, source): the selected segment is filled AND checked. */
+.segmented { display: inline-flex; border: 2px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.segmented .seg {
+  min-height: calc(var(--tap) - 4px);
+  padding: 0 var(--s4);
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.segmented .seg + .seg { border-left: 2px solid var(--border-strong); }
+.segmented .seg[aria-pressed="true"] { color: var(--accent-text); background: var(--accent); }
+.segmented .seg:focus-visible { outline-offset: -3px; }
+
+/* ---- home ---------------------------------------------------------------------------------- */
+
+.home { display: grid; gap: var(--s5); }
+.home-intro { max-width: 38rem; }
+.home-intro h2 { font-size: 1.6rem; }
+.home-intro p { margin-top: var(--s2); color: var(--text-muted); }
+.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: var(--s4); }
+.choice-card {
+  display: grid;
+  gap: var(--s2);
+  align-content: start;
+  padding: var(--s5);
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 2px solid var(--border-soft);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.choice-card:hover:not(:disabled) { border-color: var(--accent); }
+.choice-card:disabled { opacity: 0.6; cursor: not-allowed; }
+.choice-card .icon { width: 2rem; height: 2rem; color: var(--accent); }
+.choice-card strong { font-size: 1.15rem; }
+.choice-card span { color: var(--text-muted); }
+
+/* ---- forms --------------------------------------------------------------------------------- */
+
+fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+legend { padding: 0; margin-bottom: var(--s2); font-weight: 700; }
+.field + .field, fieldset + fieldset, fieldset + .field, .field + fieldset { margin-top: var(--s5); }
+label.field-label { display: block; font-weight: 700; margin-bottom: var(--s2); }
+
+input[type="text"] {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0 var(--s3);
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 2px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+input[type="text"]:disabled { opacity: 0.6; background: var(--surface-2); }
+
+.choice-set { display: grid; gap: var(--s2); }
+.choice { position: relative; display: block; cursor: pointer; }
+.choice input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.choice-body {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 var(--s3);
+  align-items: center;
+  padding: var(--s3) var(--s4);
+  background: var(--surface);
+  border: 2px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+.choice-body .icon { grid-row: span 2; width: 1.6rem; height: 1.6rem; color: var(--text-muted); }
+.choice-body strong { font-size: 1rem; }
+.choice-body small { font-size: 0.875rem; color: var(--text-muted); }
+/* Selected: a thicker accent border, a filled tick, and bold text - not colour alone. */
+.choice input:checked + .choice-body { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.choice input:checked + .choice-body .icon { color: var(--accent); }
+.choice input:checked + .choice-body strong::after { content: " \2713"; }
+.choice input:focus-visible + .choice-body { outline: 3px solid var(--focus); outline-offset: 2px; }
+/* The synthetic source is a test tool: present, but visibly second. */
+.choice-secondary .choice-body { background: transparent; border-style: dashed; }
+
+/* ---- session list -------------------------------------------------------------------------- */
+
+.list-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s3); }
+
+#session-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s3); }
+
+#session-list li.session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s2) var(--s4);
+  align-items: center;
+  padding: var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+.session-main { display: grid; gap: var(--s1); min-width: 0; }
+.session-title { font-size: 1.05rem; font-weight: 700; overflow-wrap: anywhere; }
+.session-meta { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); align-items: center; font-size: 0.875rem; color: var(--text-muted); }
+.session-note { font-size: 0.875rem; color: var(--text-muted); }
+.session.is-expired { opacity: 0.75; }
+.session.is-expired .session-expires { color: var(--warn-fg); font-weight: 700; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0.05rem var(--s2);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+.chip .icon { width: 1em; height: 1em; }
+.chip-public { color: var(--info-fg); background: var(--info-bg); }
+.chip-private { color: var(--warn-fg); background: var(--warn-bg); }
+
+.empty {
+  display: grid;
+  justify-items: start;
+  gap: var(--s2);
+  padding: var(--s5);
+  background: var(--surface);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.empty .icon { width: 2rem; height: 2rem; color: var(--text-muted); }
+.empty strong { font-size: 1.1rem; }
+.empty p { color: var(--text-muted); }
+
+/* ---- share (live) -------------------------------------------------------------------------- */
+
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--s3) var(--s5); margin: 0; }
+.facts div { min-width: 0; }
+.facts dt { font-size: 0.8125rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+.state-chip { display: inline-flex; align-items: center; gap: var(--s2); padding: 0.1rem var(--s3); font-weight: 700; border: 1px solid currentColor; border-radius: 999px; }
+
+.end-zone { padding-top: var(--s4); border-top: 1px solid var(--border-soft); }
+.confirm {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s4);
+  color: var(--error-fg);
+  background: var(--error-bg);
+  border: 2px solid var(--danger);
+  border-radius: var(--radius);
+}
+.confirm-actions { display: flex; flex-wrap: wrap; gap: var(--s3); }
+
+details.more { padding-top: var(--s2); }
+details.more > summary { cursor: pointer; font-weight: 600; padding: var(--s2) 0; }
+details.more[open] > summary { margin-bottom: var(--s2); }
+.more-body { display: grid; gap: var(--s2); }
+.kv { display: flex; justify-content: space-between; gap: var(--s4); border-bottom: 1px solid var(--border-soft); padding: var(--s1) 0; }
+.kv .k { color: var(--text-muted); }
+.kv .v { text-align: right; overflow-wrap: anywhere; }
+pre.stats { margin: var(--s2) 0 0; padding: var(--s3); overflow: auto; max-height: 16rem; background: var(--surface-2); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 0.8125rem; color: var(--text); }
+
+/* ---- watch --------------------------------------------------------------------------------- */
+
+.watch-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--s3) var(--s5); }
+.watch-title { min-width: 0; }
+.watch-title h2 { overflow-wrap: anywhere; }
+.watch-meta { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); align-items: center; margin-top: var(--s1); color: var(--text-muted); font-size: 0.9375rem; }
+.leave { display: grid; gap: var(--s1); justify-items: end; max-width: 16rem; }
+.leave .hint { margin-top: 0; text-align: right; }
+
+.stage {
+  margin-top: var(--s4);
+  background: var(--stage);
+  border-radius: var(--radius);
+  overflow: hidden;
+  /* Stacked layout: big, but never so tall that its own controls fall below the fold. The width
+     follows the height that is left under the page header and never exceeds the column. (In the
+     two-column layout below, the column decides. Fullscreen has no limit.) */
+  max-width: min(100%, max(20rem, calc((100vh - 24rem) * 16 / 9)));
+}
+
+/* A fixed 16:9 box, so the page does not jump when the first frame arrives or the picture changes
+   size; the canvas fills it and an overlay says what the area is doing. */
+.video-canvas-wrap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--stage);
+  overflow: hidden;
+}
+
+#watch-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain; /* Fit: the whole picture, letterboxed */
+  transition: opacity 0.2s;
+}
+.video-canvas-wrap[data-fit="fill"] #watch-canvas { object-fit: cover; } /* Fill: crops to cover the stage */
+
+/* A last frame that is no longer live is dimmed AND labelled; an ended/failed area shows no
+   picture at all, so nothing frozen can be mistaken for the stream. */
+.video-canvas-wrap[data-notlive="true"] #watch-canvas { opacity: 0.35; filter: grayscale(1); }
+.video-canvas-wrap[data-hidden="true"] #watch-canvas { visibility: hidden; }
+
+.video-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  padding: var(--s4);
+  text-align: center;
+  color: var(--stage-text);
+  font-size: 1.1rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+/* In-progress states get a ring; it stops turning when the person asks for reduced motion. */
+.video-canvas-wrap[data-key="connecting"] .video-overlay::before,
+.video-canvas-wrap[data-key="discovering"] .video-overlay::before,
+.video-canvas-wrap[data-key="reconnecting"] .video-overlay::before,
+.video-canvas-wrap[data-key="live"] .video-overlay::before {
+  content: "";
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 3px solid var(--stage-text);
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+
+.notlive-badge {
+  position: absolute;
+  top: var(--s3);
+  left: var(--s3);
+  padding: var(--s1) var(--s3);
+  color: #000000;
+  background: #ffd166;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.stage-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3);
+  color: var(--stage-text);
+  background: #16171a;
+}
+.stage-controls .segmented { border-color: #b4b5be; }
+.stage-controls .segmented .seg { color: var(--stage-text); }
+.stage-controls .segmented .seg + .seg { border-left-color: #b4b5be; }
+.stage-controls .segmented .seg[aria-pressed="true"] { color: #0a1a33; background: #8ab4ff; }
+.stage-controls .btn-secondary { color: var(--stage-text); border-color: #b4b5be; }
+.stage-controls .btn-secondary:hover:not(:disabled) { background: #2a2b31; }
+.stage-controls :focus-visible { outline-color: #a9c8ff; }
+
+#video-stage:fullscreen { max-width: none; display: flex; flex-direction: column; justify-content: center; width: 100vw; height: 100vh; border-radius: 0; }
+#video-stage:fullscreen .video-canvas-wrap { aspect-ratio: auto; flex: 1; }
+
+#video-note { margin-top: var(--s3); color: var(--text-muted); min-height: 1.5em; }
+
+/* Wide windows: the video takes the left column and everything else - who is sharing, Leave, the
+   details - sits in a slim column beside it, so the picture is as large as the width allows and its
+   controls stay in view. Below this width the same parts simply stack. */
+@media (min-width: 1100px) {
+  main:has(#watch-status:not(.hidden)) { max-width: 100rem; }
+  #watch-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 19rem;
+    grid-template-rows: auto 1fr;
+    column-gap: var(--s5);
+    align-items: start;
+  }
+  #watch-status > .watch-head { grid-column: 2; grid-row: 1; flex-direction: column; flex-wrap: nowrap; gap: var(--s4); }
+  #watch-status > .watch-main { grid-column: 1; grid-row: 1 / span 2; min-width: 0; }
+  #watch-status > #media-details { grid-column: 2; grid-row: 2; }
+  #watch-status .stage { margin-top: 0; max-width: none; }
+  #watch-status .leave { justify-items: stretch; max-width: none; width: 100%; }
+  #watch-status .leave .btn { width: 100%; }
+  #watch-status .leave .hint { text-align: left; }
+}
+
+/* ---- motion -------------------------------------------------------------------------------- */
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: no-preference) {
+  .video-canvas-wrap[data-key="connecting"] .video-overlay::before,
+  .video-canvas-wrap[data-key="discovering"] .video-overlay::before,
+  .video-canvas-wrap[data-key="reconnecting"] .video-overlay::before,
+  .video-canvas-wrap[data-key="live"] .video-overlay::before,
+  .headline[data-key="starting"] .icon,
+  .headline[data-key="connecting"] .icon,
+  .headline[data-key="discovering"] .icon { animation: spin 1s linear infinite; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+
+/* ---- responsive ---------------------------------------------------------------------------- */
+
+/* Tablet and below: the bar wraps, the stage keeps the full width. */
+@media (max-width: 1023px) {
+  main { padding: var(--s4); }
+  .topbar { padding: var(--s3) var(--s4); }
+  .statusbar { padding: 0 var(--s4); }
+}
+
+/* Narrow phones: one column, comfortable touch targets, the primary action full width. */
+@media (max-width: 639px) {
+  .topbar { gap: var(--s2) var(--s3); }
+  .identity { margin-left: 0; width: 100%; }
+  .tabs { width: 100%; }
+  .tab { flex: 1; justify-content: center; }
+  #session-list li.session { grid-template-columns: 1fr; }
+  #session-list li.session .btn { width: 100%; }
+  .leave { justify-items: stretch; max-width: none; width: 100%; }
+  .leave .btn { width: 100%; }
+  .leave .hint { text-align: left; }
+  .facts { grid-template-columns: 1fr 1fr; }
+  .confirm-actions .btn { flex: 1; }
+  .btn-block-mobile { width: 100%; }
+}
+
+@media (pointer: coarse) {
+  .segmented .seg { min-height: var(--tap); }
+}
+
+/* Windows high-contrast and similar: rely on real borders and system colours. */
+@media (forced-colors: active) {
+  .btn, .tab, .choice-body, .chip, .headline, .banner, .segmented { border: 2px solid ButtonText; }
+  .tab[aria-current="page"], .segmented .seg[aria-pressed="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; }
+  .choice input:checked + .choice-body { border-color: Highlight; outline: 2px solid Highlight; }
+}
+
+/* Print: the workspace is a live tool, not a document. */
+@media print { .topbar, .stage-controls, .btn { display: none !important; } }

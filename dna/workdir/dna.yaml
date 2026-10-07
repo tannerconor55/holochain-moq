@@ -1,0 +1,15 @@
+---
+manifest_version: "0"
+name: moq_directory
+integrity:
+  network_seed: ~
+  properties: ~
+  zomes:
+    - name: moq_directory_integrity
+      path: ../target/wasm32-unknown-unknown/release/moq_directory_integrity.wasm
+coordinator:
+  zomes:
+    - name: moq_directory
+      path: ../target/wasm32-unknown-unknown/release/moq_directory.wasm
+      dependencies:
+        - name: moq_directory_integrity

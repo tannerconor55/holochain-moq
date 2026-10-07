@@ -1,0 +1,16 @@
+[package]
+name = "holochain-moq-video-file"
+description = "A prerecorded video file as a holochain_moq_video::VideoFrameSource, decoded by the `gst-launch-1.0` tool (like the screen backend) and paced in real time. Knows nothing about codecs, MoQ, peers or Holochain."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-video = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+holochain-moq-codec-av1 = { workspace = true }
+holochain-moq-realtime = { workspace = true }

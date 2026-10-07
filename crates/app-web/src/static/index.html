@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Holochain MoQ</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Icons: one inline sprite, decorative everywhere (the words always carry the meaning). -->
+  <svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+    <symbol id="i-logo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><path d="M7.5 7.5a6.4 6.4 0 0 0 0 9M16.5 7.5a6.4 6.4 0 0 1 0 9M4.5 4.5a10.6 10.6 0 0 0 0 15M19.5 4.5a10.6 10.6 0 0 1 0 15"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16 9.6"/></symbol>
+    <symbol id="i-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><path d="M7.2 7.2a6.8 6.8 0 0 0 0 9.6M16.8 7.2a6.8 6.8 0 0 1 0 9.6"/></symbol>
+    <symbol id="i-spinner" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 0 1-14.6 5.9M3.5 12a8.5 8.5 0 0 1 14.6-5.9"/><path d="M18.5 3v3.5H15M5.5 21v-3.5H9"/></symbol>
+    <symbol id="i-ended" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9.5" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 2.5 20h19L12 3.5z"/><path d="M12 10v4.5M12 17.6h.01"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6h.01"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+    <symbol id="i-pattern" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 12h18M12 4v16"/></symbol>
+    <symbol id="i-watch" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></symbol>
+    <symbol id="i-leave" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 16.5l4.5-4.5L10 7.5M14.5 12H3"/></symbol>
+    <symbol id="i-fullscreen" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+  </svg>
+
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="icon" aria-hidden="true"><use href="#i-logo"/></svg>
+      <h1>Holochain MoQ</h1>
+    </div>
+    <nav aria-label="Primary">
+      <div class="tabs">
+        <button id="btn-share" class="tab" type="button"><svg class="icon" aria-hidden="true"><use href="#i-screen"/></svg>Share</button>
+        <button id="btn-watch" class="tab" type="button"><svg class="icon" aria-hidden="true"><use href="#i-watch"/></svg>Watch</button>
+      </div>
+    </nav>
+    <div class="identity">
+      <span>You are</span>
+      <span id="app-agent" class="mono">-</span>
+    </div>
+  </header>
+
+  <!-- The one status headline. It is the page's live region: a change here is announced. -->
+  <div class="statusbar">
+    <div id="status-headline" class="headline tone-info" data-key="starting" role="status" aria-live="polite">
+      <svg class="icon" aria-hidden="true"><use id="status-icon-use" href="#i-spinner"/></svg>
+      <span id="status-headline-label" class="headline-label">Starting</span>
+      <span id="status-headline-detail" class="headline-detail"></span>
+    </div>
+  </div>
+
+  <main id="main" tabindex="-1">
+    <div id="support-banner" class="banner banner-error hidden" role="alert">
+      <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+      <div class="banner-body" id="support-banner-text"></div>
+    </div>
+    <div id="error-banner" class="banner banner-error hidden" role="alert">
+      <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+      <div class="banner-body">
+        <span id="error-banner-text"></span>
+        <div class="banner-actions hidden" id="error-actions">
+          <button id="btn-retry" class="btn btn-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Try again</button>
+        </div>
+      </div>
+    </div>
+    <div id="notice-banner" class="banner banner-notice hidden" role="status">
+      <svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>
+      <div class="banner-body" id="notice-banner-text"></div>
+    </div>
+
+    <!-- Neither Share nor Watch chosen yet (and nothing running). -->
+    <section id="home-panel" class="home" aria-labelledby="home-title">
+      <div class="home-intro">
+        <h2 id="home-title">A live media workspace</h2>
+        <p>Share your screen with others on the network, or watch a session someone else is sharing. Sessions are announced to the network, and the video goes from the sharer to each viewer.</p>
+      </div>
+      <div class="choices">
+        <button id="home-share" class="choice-card" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-screen"/></svg>
+          <strong>Share your screen</strong>
+          <span>Start a live session. You choose who can watch.</span>
+        </button>
+        <button id="home-watch" class="choice-card" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-watch"/></svg>
+          <strong>Watch a session</strong>
+          <span>See who is sharing right now and join.</span>
+        </button>
+      </div>
+    </section>
+
+    <section id="share-panel" class="panel hidden" aria-labelledby="share-heading">
+      <h2 id="share-heading">Share</h2>
+
+      <form id="share-form" novalidate>
+        <fieldset>
+          <legend>What do you want to share?</legend>
+          <div class="choice-set">
+            <label class="choice">
+              <input type="radio" name="source" value="screen" checked>
+              <span class="choice-body">
+                <svg class="icon" aria-hidden="true"><use href="#i-screen"/></svg>
+                <strong>Screen</strong>
+                <small>Share what is on your screen.</small>
+              </span>
+            </label>
+            <label class="choice choice-secondary">
+              <input type="radio" name="source" value="synthetic">
+              <span class="choice-body">
+                <svg class="icon" aria-hidden="true"><use href="#i-pattern"/></svg>
+                <strong>Test pattern</strong>
+                <small>A moving pattern, for checking that the connection works. Not a real source.</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="field">
+          <label class="field-label" for="share-title">Title <span class="muted">(optional)</span></label>
+          <input id="share-title" type="text" maxlength="200" placeholder="e.g. Team demo" aria-describedby="share-title-hint">
+          <p class="hint" id="share-title-hint">Shown to viewers in the list of live sessions.</p>
+        </div>
+
+        <fieldset>
+          <legend>Who can watch?</legend>
+          <div class="choice-set">
+            <label class="choice">
+              <input type="radio" name="access" value="public" checked>
+              <span class="choice-body">
+                <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+                <strong>Public</strong>
+                <small>Anyone who finds the session can watch.</small>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="access" value="allowed">
+              <span class="choice-body">
+                <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+                <strong>Allowed agents only</strong>
+                <small>Only the agents you list (and you) can receive the video.</small>
+              </span>
+            </label>
+          </div>
+          <div class="field">
+            <label class="field-label" for="allowed-agents">Allowed agents</label>
+            <input id="allowed-agents" type="text" placeholder="agent1, agent2 (blank = only you)" disabled aria-describedby="allowed-hint">
+            <p class="hint" id="allowed-hint">Enter full Holochain agent public keys, separated by commas or spaces. Only used for "Allowed agents only".</p>
+          </div>
+        </fieldset>
+
+        <div class="field">
+          <button id="btn-start-share" class="btn btn-block-mobile" type="button"><svg class="icon" aria-hidden="true"><use href="#i-live"/></svg>Start sharing</button>
+        </div>
+      </form>
+
+      <div id="share-status" class="hidden">
+        <div class="panel-head">
+          <h3 id="share-title-shown" tabindex="-1">-</h3>
+          <span id="share-live-state" class="state-chip">-</span>
+        </div>
+        <dl class="facts">
+          <div><dt>Source</dt><dd id="share-source">-</dd></div>
+          <div><dt>Access</dt><dd id="share-access">-</dd></div>
+          <div><dt>Joinable for</dt><dd id="share-lifetime">-</dd></div>
+          <div><dt>Viewers</dt><dd id="share-viewers">-</dd></div>
+          <div><dt>Objects published</dt><dd id="share-objects">-</dd></div>
+          <div id="share-allowed-row" class="hidden"><dt>Allowed agents</dt><dd id="share-allowed" class="mono">-</dd></div>
+        </dl>
+        <details class="more">
+          <summary>Session details</summary>
+          <div class="more-body"><div class="kv"><span class="k">Session</span><span class="v mono" id="share-session">-</span></div></div>
+        </details>
+
+        <div class="end-zone">
+          <button id="btn-stop-share" class="btn btn-danger btn-block-mobile" type="button" aria-describedby="end-hint"><svg class="icon" aria-hidden="true"><use href="#i-ended"/></svg>End session for everyone</button>
+          <p class="hint" id="end-hint">Stops the video for every viewer and closes the session. Viewers can only Leave; only you can end it.</p>
+          <div id="end-confirm" class="confirm hidden" role="group" aria-labelledby="end-confirm-title">
+            <strong id="end-confirm-title">End this session for everyone?</strong>
+            <span>Everyone watching will lose the video. This cannot be undone; you can start a new session afterwards.</span>
+            <div class="confirm-actions">
+              <button id="btn-confirm-end" class="btn btn-danger" type="button">Yes, end the session</button>
+              <button id="btn-cancel-end" class="btn btn-secondary" type="button">Keep sharing</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="watch-panel" class="panel panel-wide hidden" aria-labelledby="watch-heading">
+      <h2 id="watch-heading" class="visually-hidden">Watch</h2>
+
+      <div id="watch-select" class="panel">
+        <div class="list-head">
+          <h3>Live sessions <span class="hint" id="sessions-updated"></span></h3>
+          <button id="btn-refresh-sessions" class="btn btn-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button>
+        </div>
+        <ul id="session-list" aria-label="Live sessions"></ul>
+      </div>
+
+      <div id="watch-status" class="hidden">
+        <div class="watch-head">
+          <div class="watch-title">
+            <h3 id="watch-title" class="watch-heading" tabindex="-1">-</h3>
+            <div class="watch-meta">
+              <span>Shared by <span id="watch-publisher" class="mono">-</span></span>
+              <span id="watch-access" class="chip">-</span>
+              <span id="watch-live-state" class="state-chip">-</span>
+            </div>
+          </div>
+          <div class="leave">
+            <button id="btn-stop-watch" class="btn btn-secondary" type="button" aria-describedby="leave-hint" title="Stops this viewer only - the publisher's session is not affected"><svg class="icon" aria-hidden="true"><use href="#i-leave"/></svg>Leave</button>
+            <p class="hint" id="leave-hint">Stops only your viewing. The session carries on for everyone else.</p>
+          </div>
+        </div>
+
+        <div class="watch-main">
+          <div id="video-stage" class="stage">
+            <div class="video-canvas-wrap" id="video-wrap" data-key="" data-fit="fit" data-notlive="false" data-hidden="false">
+              <canvas id="watch-canvas" role="img" aria-label="Shared video"></canvas>
+              <span id="video-badge" class="notlive-badge hidden">Not live - showing the last frame</span>
+              <div id="video-overlay" class="video-overlay hidden"></div>
+            </div>
+            <div class="stage-controls" role="group" aria-label="Video view">
+              <div class="segmented" role="group" aria-label="Picture size">
+                <button id="btn-fit" class="seg" type="button" aria-pressed="true" title="Show the whole picture">Fit</button>
+                <button id="btn-fill" class="seg" type="button" aria-pressed="false" title="Fill the area; the edges may be cropped">Fill</button>
+              </div>
+              <button id="btn-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-fullscreen"/></svg><span id="fullscreen-label">Fullscreen</span></button>
+            </div>
+          </div>
+
+          <div id="video-error" class="banner banner-error hidden" role="alert">
+            <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+            <div class="banner-body" id="video-error-text"></div>
+          </div>
+          <div id="video-note" class="hint"></div>
+        </div>
+
+        <details id="media-details" class="more">
+          <summary>Playback details</summary>
+          <div class="more-body">
+            <div class="kv"><span class="k">Video</span><span class="v" id="video-status">-</span></div>
+            <div class="kv"><span class="k">Video epoch</span><span class="v" id="video-epoch">-</span></div>
+            <div class="kv"><span class="k">Video size</span><span class="v" id="video-size">-</span></div>
+            <div class="kv"><span class="k">Frames decoded</span><span class="v" id="video-frames">-</span></div>
+            <div class="kv"><span class="k">Status</span><span class="v" id="app-state">-</span></div>
+            <pre id="media-stats-text" class="stats"></pre>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+  <script src="/ui.js"></script>
+  <script src="/video.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+[package]
+name = "holochain-moq-av-reconnect"
+description = "Reconnect-aware A/V subscriber: composes the reconnect controller (holochain-moq-node) with the existing A/V decoders (holochain-moq-av-subscribe). Owns no reconnect, codec, synchronization or Holochain logic of its own."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-audio-transport = { workspace = true }
+holochain-moq-av-subscribe = { workspace = true }
+holochain-moq-codec-opus = { workspace = true }
+holochain-moq-media-timeline = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-playback = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+holochain-moq-realtime = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+holochain-moq-audio-adapt = { workspace = true }
+holochain-moq-video-adapt = { workspace = true }
+holochain-moq-av-session = { workspace = true }
+holochain-moq-video = { workspace = true }
+holochain-moq-av-sync = { workspace = true }
+holochain-moq-audio = { workspace = true }
+holochain-moq-codec-av1 = { workspace = true }
+uuid = { workspace = true }

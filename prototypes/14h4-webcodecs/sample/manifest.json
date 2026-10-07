@@ -1,0 +1,25 @@
+{
+  "seq_header": {
+    "seq_profile": 0,
+    "seq_level_idx_0": 31,
+    "seq_tier_0": 0,
+    "bit_depth": 8,
+    "mono_chrome": false,
+    "subsampling_x": 1,
+    "subsampling_y": 1
+  },
+  "codec_string_minimal": "av01.0.31M.08",
+  "codec_string_full": "av01.0.31M.08.0.110.01.01.01.0",
+  "frames": [
+    {"file":"frame_0000.av1","sequence":0,"group":0,"timestamp_ms":0,"random_access":true,"byte_len":200},
+    {"file":"frame_0001.av1","sequence":1,"group":0,"timestamp_ms":66,"random_access":false,"byte_len":32},
+    {"file":"frame_0002.av1","sequence":2,"group":0,"timestamp_ms":133,"random_access":false,"byte_len":63},
+    {"file":"frame_0003.av1","sequence":3,"group":0,"timestamp_ms":200,"random_access":false,"byte_len":29},
+    {"file":"frame_0004.av1","sequence":4,"group":0,"timestamp_ms":266,"random_access":false,"byte_len":59},
+    {"file":"frame_0005.av1","sequence":5,"group":1,"timestamp_ms":333,"random_access":true,"byte_len":196},
+    {"file":"frame_0006.av1","sequence":6,"group":1,"timestamp_ms":400,"random_access":false,"byte_len":63},
+    {"file":"frame_0007.av1","sequence":7,"group":1,"timestamp_ms":466,"random_access":false,"byte_len":29},
+    {"file":"frame_0008.av1","sequence":8,"group":1,"timestamp_ms":533,"random_access":false,"byte_len":66},
+    {"file":"frame_0009.av1","sequence":9,"group":1,"timestamp_ms":600,"random_access":false,"byte_len":36}
+  ]
+}

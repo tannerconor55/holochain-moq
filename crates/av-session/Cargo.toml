@@ -1,0 +1,21 @@
+[package]
+name = "holochain-moq-av-session"
+description = "One A/V publishing session: runs the existing video (MediaObjectSource -> MediaPublication) and audio (AudioFrameSource -> Opus -> MediaPublication) pipelines concurrently on separate tracks and ties their lifecycles together. No codec, capture, sync, Holochain or transport logic of its own."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-audio = { workspace = true }
+holochain-moq-audio-transport = { workspace = true }
+holochain-moq-codec-opus = { workspace = true }
+holochain-moq-realtime = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+url = { workspace = true }

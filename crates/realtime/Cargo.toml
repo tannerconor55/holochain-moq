@@ -1,0 +1,38 @@
+[package]
+name = "holochain-moq-realtime"
+description = "Realtime (ephemeral) data-plane abstraction. Wraps MoQ-over-QUIC behind a small RealtimeTransport trait so the rest of the system does not depend on moq-transport/moq-native-ietf directly."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moq-transport = { workspace = true }
+moq-native-ietf = { workspace = true }
+# Stage 15.2: to read/write the application close code that marks a refused admission.
+web-transport = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+url = { workspace = true }
+sha2 = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+holochain-moq-protocol = { workspace = true }
+url = { workspace = true }
+# Test-only: building a real Holochain-shaped agent keypair/key to sign admission
+# proofs with, without a conductor. Not part of this crate's production surface.
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }

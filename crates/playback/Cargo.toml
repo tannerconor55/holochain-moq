@@ -1,0 +1,9 @@
+[package]
+name = "holochain-moq-playback"
+description = "The playback/output boundary: sinks that consume DECODED video and audio together with their MediaTimeline positions and media epoch. No transport, codec, discovery or Holochain dependency, and no platform backend yet."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-media-timeline = { workspace = true }

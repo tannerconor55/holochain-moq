@@ -1,0 +1,18 @@
+[package]
+name = "holochain-moq-protocol"
+description = "Shared, transport-agnostic types for the Holochain+MoQ control plane (peers, streams, endpoints, capabilities). No networking or Holochain HDK code lives here."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# No `v4` here: this crate is also compiled to wasm32 by the DNA (dna/), where
+# uuid's RNG feature would not build. Consumers that generate ids enable `v4` themselves.
+uuid = { version = "1", default-features = false, features = ["serde"] }
+# Verification only (no `rand_core`/key generation: nothing here needs OS randomness,
+# so this still builds for wasm32 in the DNA). Decodes Holochain's own agent-key wire
+# format without depending on `holo_hash` (see `session.rs` module docs on why).
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = "0.22"

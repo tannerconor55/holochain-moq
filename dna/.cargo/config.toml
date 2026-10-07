@@ -1,0 +1,6 @@
+# Zomes import their host functions (`__hc__*`) from the conductor, so the
+# wasm linker must tolerate undefined symbols. Recent rustc no longer passes
+# --allow-undefined for wasm32-unknown-unknown implicitly.
+# getrandom's custom backend: HDK provides the randomness host function.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="custom"', "-C", "link-arg=--allow-undefined"]

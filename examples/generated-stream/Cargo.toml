@@ -1,0 +1,24 @@
+[package]
+name = "generated-stream"
+description = "Phase 4 demo: a long-lived publisher generating synthetic frames over MoQ/QUIC, and a subscriber printing them. No Holochain (see crates/holochain-e2e for the Holochain-discovered version)."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "generated-publisher"
+path = "src/bin/generated_publisher.rs"
+
+[[bin]]
+name = "generated-subscriber"
+path = "src/bin/generated_subscriber.rs"
+
+[dependencies]
+holochain-moq-realtime = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }

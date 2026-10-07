@@ -1,0 +1,12 @@
+[package]
+name = "gen_svt_ffi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Regenerates crates/codec-av1/src/svt/ffi.rs. NOT a workspace member: bindgen needs libclang and this is only run by hand."
+
+[dependencies]
+bindgen = "=0.72.1"
+
+# Not part of the main workspace.
+[workspace]

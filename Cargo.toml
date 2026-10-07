@@ -1,0 +1,145 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/realtime",
+    "crates/node",
+    "crates/hdk-bridge",
+    "crates/video",
+    "crates/audio",
+    "crates/codec-opus",
+    "crates/audio-transport",
+    "crates/media-timeline",
+    "crates/camera-v4l",
+    "crates/mic-alsa",
+    "crates/av-session",
+    "crates/av-subscribe",
+    "crates/av-reconnect",
+    "crates/playback",
+    "crates/screen-linux",
+    "crates/video-file",
+    "crates/screenshare",
+    "crates/app",
+    "crates/app-web",
+    "crates/av-sync",
+    "crates/video-adapt",
+    "crates/audio-adapt",
+    "crates/codec-av1",
+    "crates/holochain-e2e",
+    "examples/two-peer",
+    "examples/generated-stream",
+]
+
+# The DNA (wasm32 zomes) is its own Cargo workspace; see dna/.
+exclude = ["dna"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/holochain-moq/holochain-moq"
+
+[workspace.dependencies]
+# --- MoQ / QUIC data plane (Cloudflare's moq-rs, IETF draft-14 branch) ---
+moq-transport = "0.16.2"
+moq-native-ietf = "0.10.0"
+web-transport = "0.10"
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.14"
+url = "2"
+sha2 = "0.10"
+
+# --- async runtime / utils ---
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+
+# --- app-level ---
+anyhow = { version = "1", features = ["backtrace"] }
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = "0.4"
+# 14H: the local web control surface's HTTP layer only (crates/app-web) - already present
+# transitively (via holochain's own bootstrap server), pinned here to the same major
+# version so it resolves to the one already in the lockfile.
+axum = "0.8"
+
+# --- local crates ---
+holochain-moq-protocol = { path = "crates/protocol" }
+holochain-moq-realtime = { path = "crates/realtime" }
+holochain-moq-node = { path = "crates/node" }
+holochain-moq-hdk-bridge = { path = "crates/hdk-bridge" }
+holochain-moq-codec-av1 = { path = "crates/codec-av1" }
+holochain-moq-video = { path = "crates/video" }
+holochain-moq-audio = { path = "crates/audio" }
+holochain-moq-codec-opus = { path = "crates/codec-opus" }
+holochain-moq-audio-transport = { path = "crates/audio-transport" }
+holochain-moq-media-timeline = { path = "crates/media-timeline" }
+holochain-moq-camera-v4l = { path = "crates/camera-v4l" }
+holochain-moq-mic-alsa = { path = "crates/mic-alsa" }
+holochain-moq-av-session = { path = "crates/av-session" }
+holochain-moq-av-subscribe = { path = "crates/av-subscribe" }
+holochain-moq-av-reconnect = { path = "crates/av-reconnect" }
+holochain-moq-playback = { path = "crates/playback" }
+holochain-moq-screen-linux = { path = "crates/screen-linux" }
+holochain-moq-video-file = { path = "crates/video-file" }
+holochain-moq-screenshare = { path = "crates/screenshare" }
+holochain-moq-app = { path = "crates/app" }
+holochain-moq-av-sync = { path = "crates/av-sync" }
+holochain-moq-video-adapt = { path = "crates/video-adapt" }
+holochain-moq-audio-adapt = { path = "crates/audio-adapt" }
+
+# Keep debug symbols even in release while the project is young.
+[profile.release]
+debug = true
+
+# The Holochain conductor dependency tree (sweettest) is huge; dependency
+# debuginfo is what filled the disk. Workspace crates keep full debuginfo.
+[profile.dev.package."*"]
+debug = false
+
+# The AV1 encoder/decoder are pure Rust and unusably slow at opt-level 0.
+[profile.dev.package.rav1e]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.rav1d]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.v_frame]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.av-scenechange]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.av1-grain]
+opt-level = 3
+[profile.dev.package.aligned-vec]
+opt-level = 3
+[profile.dev.package.aligned]
+opt-level = 3
+[profile.dev.package.arrayvec]
+opt-level = 3
+[profile.dev.package.itertools]
+opt-level = 3
+[profile.dev.package.num-traits]
+opt-level = 3
+[profile.dev.package.num-rational]
+opt-level = 3
+[profile.dev.package.bitstream-io]
+opt-level = 3
+
+# unsafe-libopus (libopus transpiled to Rust) is unusably slow at opt-level 0.
+[profile.dev.package.unsafe-libopus]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

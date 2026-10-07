@@ -1,0 +1,63 @@
+[package]
+name = "holochain-moq-app-web"
+description = "Stage 14H.1: a local, loopback-only HTTP control surface over the existing holochain-moq-app application layer - a thin JSON translation of the same App API the persistent CLI shell already uses, not a second application layer."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "holochain-moq-app-web"
+path = "src/main.rs"
+
+[dependencies]
+holochain-moq-app = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-screenshare = { workspace = true }
+# For the placeholder (no display) Watch sink - `ProgressSink<MemoryVideoSink>`, the same
+# already-existing, test-proven pair `crates/app`'s own tests use. Browser video is not
+# implemented in 14H.1 (see README.md); this crate never touches a decoded frame.
+holochain-moq-playback = { workspace = true }
+# Stage 14H.5: for `MediaObject` - the still-encoded AV1 access unit `App::
+# start_watch_encoded`'s queue yields, which `src/video_ws.rs` frames onto the browser
+# WebSocket wire format. This crate still never decodes it or touches QUIC/MoQ itself.
+holochain-moq-realtime = { workspace = true }
+# For the two existing video sources the Share flow offers (screen, synthetic) -
+# constructing one is the caller's job, exactly as `crates/app`'s own `main.rs` already
+# does; encoding/publishing stays in `Sharer`/`screenshare`.
+holochain-moq-video = { workspace = true }
+holochain-moq-screen-linux = { workspace = true }
+holochain-moq-codec-av1 = { workspace = true }
+# For the `ws` feature: `crates/app-web`'s own small binary browser-video WebSocket
+# route (see `src/video_ws.rs`), not a second HTTP framework - axum already carries
+# `tokio-tungstenite` transitively (via other workspace members), this just turns on
+# the extractor in this crate's own build graph too.
+axum = { workspace = true, features = ["ws"] }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+# Stage 15.5: paused-clock tests (`start_paused`) decide timeouts deterministically, with no sleeping.
+tokio = { workspace = true, features = ["test-util"] }
+# Test-only: drive the axum `Router` in-process (no real TCP listener) via
+# `tower::ServiceExt::oneshot`, the standard way to test an axum app.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# Stage 14H.5: a real WebSocket client to exercise `/api/watch/video` end-to-end (a
+# `tower::oneshot` request/response cannot drive a protocol upgrade) - already present
+# in the workspace lockfile as axum's own `ws` feature dependency, pinned to the same
+# version here.
+tokio-tungstenite = "0.29"
+futures = { workspace = true }
+# Stage 15.2 tests: real Ed25519 keys in real Holochain agent-key format, so the real
+# 14F proof is signed and verified for real (no fake signer, no bypass).
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = "0.22"
