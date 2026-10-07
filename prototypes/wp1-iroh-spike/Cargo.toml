@@ -1,0 +1,21 @@
+[package]
+name = "wp1-iroh-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Own workspace: kept out of the main holochain-moq workspace/lockfile on purpose
+# until the WP1 transport decision is accepted.
+[workspace]
+
+[dependencies]
+moq-net = "=0.3.10"
+moq-tokio = { version = "=0.19.23", features = ["iroh"] }
+iroh = { version = "=1.3.0", features = ["test-utils"] }
+web-transport-iroh = "=0.7.0"
+iroh-relay = { version = "=1.3.0", features = ["server"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
