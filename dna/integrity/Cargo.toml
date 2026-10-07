@@ -12,4 +12,7 @@ name = "moq_directory_integrity"
 hdi = { workspace = true }
 serde = { workspace = true }
 holochain_serialized_bytes = "0.0.57"
+# Explicit so `ActionHash` base64 parsing/printing (WP7 lobby references) never depends on
+# feature unification with the coordinator. Same version hdi already resolves.
+holo_hash = { version = "=0.7.0", features = ["encoding"] }
 holochain-moq-protocol = { workspace = true }
