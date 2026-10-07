@@ -3025,6 +3025,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "holochain-moq-clock",
+ "holochain-moq-mesh",
+ "holochain-moq-mesh-iroh",
+ "holochain-moq-protocol",
+ "iroh",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "holochain-moq-kart-wire"
 version = "0.1.0"
 dependencies = [

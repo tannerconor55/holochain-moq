@@ -183,3 +183,41 @@ fn the_clock_layer_sits_above_the_mesh_and_knows_no_transport() {
         );
     }
 }
+
+#[test]
+fn the_host_layer_sits_above_mesh_and_clock_and_knows_no_transport_or_game() {
+    let deps = normal_deps("crates/host/Cargo.toml");
+    assert!(deps.iter().any(|d| d == "holochain-moq-mesh"), "{deps:?}");
+    for bad in TRANSPORT.iter().chain(HOLOCHAIN).chain(&[
+        "holochain-moq-mesh-iroh",
+        "holochain-moq-kart-wire",
+        "holochain-moq-node",
+        "holochain-moq-realtime",
+    ]) {
+        assert!(
+            !deps.iter().any(|d| d == bad),
+            "crates/host depends on {bad}"
+        );
+    }
+    let src = sources("crates/host/src");
+    for word in [
+        "iroh::",
+        "moq_net",
+        "kart_wire",
+        "hdk::",
+        "holochain_client",
+    ] {
+        assert!(!src.contains(word), "crates/host source mentions {word}");
+    }
+    for m in [
+        "crates/mesh/Cargo.toml",
+        "crates/mesh-iroh/Cargo.toml",
+        "crates/clock/Cargo.toml",
+        "crates/kart-wire/Cargo.toml",
+    ] {
+        assert!(
+            !normal_deps(m).iter().any(|d| d == "holochain-moq-host"),
+            "{m} depends on the host layer"
+        );
+    }
+}
