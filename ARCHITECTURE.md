@@ -867,3 +867,127 @@ Release numbers are in the README table. This says nothing about a real Internet
   responder (reconnect is WP6). Who may act as host is not checked (WP5/WP8).
 - **The host does not yet collect peers' clock quality before starting.** A game layer
   should not start while any peer reports `Poor` or failed (WP10).
+
+## Host authority, AI karts and migration (WP5)
+
+```text
+Holochain (identity, lobby, membership, results)   ── setup only: creator + membership snapshot
+        ▼
+holochain-moq-host     AuthorityState: epochs, election, claim resolution (pure)
+        │              HostSession: heartbeats, watchdog, HostChanged, AI tracks, resume
+        ▼
+holochain-moq-clock + holochain-moq-mesh  ── MoQ (moq-net) over iroh: Latest / ReliableOrdered
+```
+
+The host crate depends on `mesh`, `clock` and `protocol` (for `AgentPubKeyB64` only). It
+has no dependency on iroh, MoQ, TLS, Holochain or kart-wire, which
+`crates/mesh/tests/boundaries.rs` enforces. Nothing on this path calls Holochain.
+
+**Ownership.**
+- The host owns the AI karts (`ai-<slot>` tracks) and host-arbitrated decisions.
+- Players keep owning their own kart tracks: the host layer never claims authority over
+  them, and it doesn't assume every `Latest` track is host-owned.
+- AI *behaviour* is not in this crate. It publishes opaque AI snapshots and, on
+  migration, hands the new host the latest snapshot per slot (`HostEvent::BecameHost`).
+  How the game continues the simulation from that snapshot is the game layer's job.
+
+**Epoch.**
+- Every host-owned message carries its epoch. Heartbeats and AI frames are applied only
+  from the current epoch's host, and an older epoch is never applied, whenever it
+  arrives.
+- Authority changes only through `HostChanged`, which must be a self-claim by a member
+  that hasn't failed or been deposed, for a newer epoch or for the same epoch with a
+  lower agent.
+- A deposed host (for example one that hung and came back) cannot claim its way back,
+  even though it is the lowest agent: it is rejected as `FailedHost`.
+
+**Election.**
+- The successor is the lowest connected member that hasn't failed in this race.
+- A peer only claims for itself. It waits a bounded time for the expected successor
+  before skipping it.
+- A rightful successor that hears a premature higher claim counter-claims the same
+  epoch, so the outcome doesn't depend on who detected the failure first.
+
+### Split-brain: what is and isn't guaranteed
+
+- **Guaranteed, given connectivity.** If every survivor can hear every other's control
+  track, all of them end on the same host and epoch:
+  - same-epoch claims resolve to the lower agent;
+  - a rightful successor counter-claims;
+  - a claimant that loses steps down and stops publishing AI.
+
+  Tested with forced divergent membership views at 4 peers.
+- **Not guaranteed: a real partition.** Peers that cannot hear each other at all can
+  each elect a host within their own partition. This is not consensus and has no
+  quorum. With 2–8 players a quorum rule would leave a 2-player race with no host after
+  a failure. A partitioned mesh is also broken for gameplay anyway.
+- **A false suspicion still costs a migration.** A single peer's mistaken failure view
+  (for example a lossy link to a healthy host) can trigger a migration: the claim is
+  adopted by everyone. Correctness holds (one host, newer epoch), but the old host is
+  deposed for the rest of the race.
+
+### What the test matrix found (each fixed, none masked)
+
+1. **False failure during setup under loss.** At 2% netem, a follower declared the host
+   failed before it was killed. Its heartbeat subscription hadn't delivered yet, and the
+   watchdog counted setup time as silence. Fix: `join_timeout` applies until the first
+   heartbeat from the current host.
+2. **A slow-but-alive successor was skipped.** At 5% netem, agent(2) gave up waiting for
+   agent(1), which was still in its join grace. Fix: `succession_timeout ≥ join_timeout`
+   (both default to 5 s).
+3. **Winner depended on detection timing** with divergent views. Fix: the counter-claim
+   rule. My first scripted edit of it silently failed to apply and was caught by the
+   forced split-brain test.
+4. **The AI-resume assertion was too strict.** A frame in flight from the dead host can
+   reach a watcher but not the successor. The successor correctly resumes from *its*
+   latest snapshot, so a watcher may see one tick twice, distinguishable by epoch.
+
+### Measured (loopback, one process, release; test timings 100 ms / 1 s unless noted)
+
+| Scenario | Detection after kill | New host at epoch 2 | HostChanged adopted by others | AI resume |
+|---|---|---|---|---|
+| 2 / 4 / 8 peers, direct | 1037 / 936 / 1040 ms | agent(1), same instant | 0 / 2 / 6 followers within ≤ 0.4 ms | — |
+| 4 / 8 peers, relay-only | 1039 ms | agent(1) | ≤ 0.4 ms | — |
+| 8 peers, direct, **default timings** (250 ms / 2 s) | 1873 ms | agent(1) | 6 within 0.4 ms | — |
+| AI, 4 / 8 direct, 4 relay-only, 3 slots at 30 Hz | — | agent(1), ~1.0 s after kill | — | successor publishes exactly snapshot + 1; ~29–30 Hz after |
+| netem 2 % / 5 % direct, 4 peers | 937–1039 / 1036 ms | agent(1) | ≤ 0.2 ms | snapshot + 1, ~28–29 Hz |
+| netem 2 % / 5 % relay-only, 4 peers | 1041 / 1041 ms | agent(1) | 0.4 / **28.6** ms (relay TCP stalls) | snapshot + 1, ~29 Hz |
+
+- **Detection.** A detection before `kill + timeout` comes from the last heartbeat
+  preceding the kill. Failure is always declared only after `failure_timeout` of
+  silence, which the tests assert.
+- **Cost.**
+  - Heartbeat: 32 B of payload with the test keys, 72 B with a real 53-character key,
+    at 4 Hz per follower. That is roughly 0.4–0.6 KB/s per follower on the wire, or
+    3–4 KB/s out from the host at 8 peers, against ~43 KB/s of game traffic.
+  - CPU of the host layer (heartbeats plus watchdogs, 8 peers in one process): 4.40 %
+    vs 2.60 % of one core with and without it.
+- **Stale rejection.**
+  - 20 of 20 injected epoch-1 AI frames on the live path were rejected as `Stale`.
+  - The deposed host's same-epoch and older claims were rejected by all 3 others
+    (6 rejections).
+  - A replayed epoch-2 `HostChanged` after epoch 3 was rejected as `Stale`.
+
+### Known limitations (WP5)
+
+- **In-process loopback only.** Direct, a local in-process relay and netem were tested.
+  Not tested on the real Internet, through NAT, or between physical machines.
+- **Partitions can produce one host per partition** (see above). False suspicions cost
+  a migration.
+- **`failure_timeout` must exceed the worst relay stall.** On a lossy relay, iroh's
+  QUIC-over-TCP head-of-line stalls (WP3: p99 ~0.6 s at 5 %) delay heartbeats. A stall
+  longer than `failure_timeout` would look like a failure and trigger a migration. The
+  default 2 s leaves margin over what was measured; this is not fixed here.
+- **No rejoin.** A failed or deposed host is never re-elected in the same race (WP6).
+  The responder side of the clock (WP4) and the host's subscriptions cover the peers
+  connected at setup.
+- **Ex-host producers stay idle, not removed.** An ex-host keeps its AI track producers
+  allocated but silent (`publish_ai` refuses), because mesh-iroh cannot re-publish a
+  track name once used.
+- **AI continuity is the game's job.** The game must continue its simulation from the
+  snapshot. A watcher may see the last old-epoch tick repeated under the new epoch,
+  since a frame in flight from the dead host can reach it but not the successor.
+- **Hostile peers are not handled (WP8/WP9).** Any member can claim authority with a
+  higher epoch and it will be adopted.
+- **kart-wire `HostChanged` (event type 2) is not the authority mechanism** and carries
+  no epoch. The host crate's `HostChanged` is.

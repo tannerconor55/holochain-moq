@@ -975,3 +975,80 @@ A sample with negative RTT is discarded.
   `StartConfig::lead` defaults to 3 s. Each peer waits until its local clock reads
   `start_at - offset_to_host`. If that moment has already passed, `wait_until` returns
   `StartOutcome::Late { by }` and the late start is never hidden.
+
+## WP5: host authority, AI karts, migration (`crates/host`)
+
+### Tracks
+
+| Track | Mode | Publisher | Carries |
+|---|---|---|---|
+| `race/<r>/<agent>/host-ctl` | ReliableOrdered | every peer (any may become host) | `HostChanged` when that peer becomes host |
+| `race/<r>/<host>/host-hb` | Latest | the current host | `Heartbeat` every `heartbeat_interval` (default 250 ms) |
+| `race/<r>/ai-<slot>/state` | Latest | the current host | `AiFrame` (opaque, game-defined AI snapshot) |
+
+Each peer subscribes, at setup, to every other member's `host-ctl`. Its subscriptions to
+`host-hb` and the AI tracks always point at the **current** host's session, and are
+replaced when the authority changes. The mesh authenticates the publisher of every
+track, so a message's sender is never taken from its payload alone.
+
+### Messages, version 1 (big-endian; agent = `AgentPubKey` text, 1–64 bytes, length-prefixed)
+
+| Message | Layout |
+|---|---|
+| `Heartbeat` (type 1) | `version u8, type u8, epoch u32, seq u32, host_time_us u64` (host's WP4 monotonic clock, diagnostic only), `len u8 + host agent` |
+| `HostChanged` (type 2) | `version, type, epoch u32, len u8 + new host, prev_epoch u32, len u8 + previous host` |
+| `AiFrame` (type 3) | `version, type, epoch u32, slot u8, len u16, payload` (≤ 1015 B, opaque) |
+
+Decoding rejects:
+- an unknown version or type;
+- epoch 0;
+- an empty, over-long or non-key-text agent;
+- `len` over the limit (checked before any payload is read);
+- truncated input or trailing bytes.
+
+### Epochs and acceptance
+
+- **Initial authority.** The race starts at **epoch 1** with `host = lobby creator`.
+  Epoch 0 is never valid, and no election happens at race start. Every transition is
+  `epoch + 1`.
+- **Heartbeats and AI frames.** These are applied only if `epoch == current epoch` and
+  the sender is the current host:
+  - an older epoch is `Stale` (never applied, however late it arrives);
+  - a newer epoch whose `HostChanged` hasn't been adopted yet is `Future` (not applied);
+  - the right epoch from the wrong sender is `NotHost`.
+  
+  A heartbeat whose `host` field differs from its track's publisher is rejected.
+- **`HostChanged` from `sender`.** It is adopted only if:
+  - its new host is the sender itself (a peer can only claim for itself);
+  - that sender is a member;
+  - the sender has not failed or been deposed in this race;
+  - and its epoch is either newer than the current one, or equal to it with a *lower*
+    agent than the current host (the same-epoch tie-break).
+  
+  An older epoch is `Stale`, so a delayed `HostChanged` can never roll authority back.
+- **Counter-claim.** A peer that receives a claim for exactly the next epoch from a
+  higher agent, while by its own view *it* is the deterministic successor, claims that
+  same epoch itself. The tie-break then converges every peer on it.
+
+### Election and failure detection
+
+- **Failure.** A follower declares the host failed after `failure_timeout` (default
+  2 s, i.e. 8 missed heartbeats) without an authoritative heartbeat. Until it has heard
+  the current host's *first* heartbeat, `join_timeout` (default 5 s) applies instead,
+  because subscription setup can take seconds under loss.
+- **Successor.** The lowest member, by the mesh's byte-wise key order, that is connected
+  and has not failed or been deposed in this race. If that is the local peer, it claims
+  `epoch + 1`, sends `HostChanged`, and starts heartbeats and AI. Otherwise it waits up
+  to `succession_timeout` (default 5 s, `≥ join_timeout`) for the successor's
+  `HostChanged`, then marks that successor failed and proposes the next.
+- **Membership.** Members come from the lobby membership snapshot given at setup. Liveness
+  comes from the mesh's connected peers. No Holochain call is made.
+
+### RaceStart and kart-wire `HostChanged`
+
+- **RaceStart.** `RaceStart` (kart-wire, WP4) is sent **once**, by the initial host at
+  epoch 1. A migration keeps the same race and its start time; it does not restart the
+  race and does not send a new `RaceStart`.
+- **kart-wire `HostChanged` (event type 2)** keeps its byte layout unchanged. It carries
+  no epoch, so it is **not** the authority mechanism; the host-authority `HostChanged`
+  above is. Event type 2 remains available for a game-level notification.

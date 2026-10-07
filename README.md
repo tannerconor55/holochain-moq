@@ -28,6 +28,7 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP2 | Symmetric game mesh: `MeshSession` over `MeshTransport`, iroh + moq-net (draft-16), AgentPubKey <-> iroh EndpointId binding | **done, tested on loopback + local relay** - `crates/mesh`, `crates/mesh-iroh`. **No real-network / NAT test run**; no reconnect (WP6) |
 | WP3 | Game delivery contracts (`Latest` over MoQ datagrams, bounded `ReliableOrdered` with replay), `kart-wire` v1 format, loss/latency/bandwidth/CPU measurements | **done, tested locally** (loopback direct, local relay, kernel netem loss in a private network namespace) - `crates/kart-wire`, `crates/mesh-iroh` (`tests/delivery.rs`, `examples/mesh_bench.rs`). **Not tested over the Internet or through NAT** |
 | WP4 | Host-relative clock estimation (NTP 4-timestamp samples over `Latest`, robust estimator) and race-start scheduling | **done, tested locally** (loopback direct, local relay, netem 2/5 %, simulated clock skew) - `crates/clock`. **Not validated on a real network** |
+| WP5 | Host authority: epochs, deterministic election, heartbeat failure detection, host-owned AI tracks, migration with resume, stale-epoch rejection | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/host`. **Not tested on the real Internet or between machines** |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before
@@ -976,3 +977,40 @@ sync, against 43 KB/s of game traffic. CPU above the 30 Hz baseline during sync 
 - **Asymmetric paths are bounded (`error_bound`), not corrected.**
 - **Relay TCP head-of-line blocking (WP3) remains.** It lengthens sync (≤3.6 s measured) and `RaceStart` delivery (≤216 ms measured), and is absorbed by the 3 s default lead, not fixed.
 - **The responder covers peers connected at its start.** The host does not yet gather peers' clock quality before starting (WP10).
+
+## WP5: host authority, AI karts and migration
+
+```text
+host = lobby creator at epoch 1 (no election at start); every change is epoch + 1
+host:      race/<r>/<host>/host-hb (Latest, 250 ms)   race/<r>/ai-<slot>/state (Latest, AiFrame{epoch,..})
+everyone:  race/<r>/<agent>/host-ctl (ReliableOrdered) HostChanged{epoch, new host, prev}
+failure:   no authoritative heartbeat for 2 s (5 s before the first one) -> lowest connected,
+           not-failed member claims epoch + 1; a lower rightful successor counter-claims
+accept:    only epoch == current from the current host; older epochs are never applied
+```
+
+```bash
+cargo test -p holochain-moq-host                                          # unit, wire, matrix (netem needs userns + tc)
+cargo test --release -p holochain-moq-host -- --test-threads=1 --nocapture  # the numbers below
+```
+
+Tested in-process (direct and an in-process local relay) and with netem. **Not tested on
+the real Internet or between physical machines.** Release, test timings (100 ms
+heartbeats, 1 s failure timeout) unless noted:
+
+| Test | Result |
+|---|---|
+| Initial host, 2 / 4 / 8 peers | creator is the only host at epoch 1, no election, followers receive heartbeats |
+| Host killed, 2 / 4 / 8 direct, 4 / 8 relay-only | detected 0.94–1.04 s after kill; agent(1) at epoch 2; `HostChanged` adopted by every follower within 0.4 ms; exactly one host afterwards |
+| Same, 8 peers, default timings (250 ms / 2 s) | detected 1.87 s after kill; same result |
+| Heartbeats paused 600 ms (< 1 s timeout) | no election |
+| AI migration (3 slots, 30 Hz), 4 / 8 direct, 4 relay-only | successor publishes exactly from its latest snapshot + 1; no epoch-1 frame accepted after epoch 2; ~30 Hz after |
+| Hung old host comes back | it stepped down (`publish_ai` → `NotHost`); 20/20 injected epoch-1 frames rejected as stale; its same-epoch and older claims rejected (`FailedHost` / `Stale`) |
+| Delayed `HostChanged` (epoch 2 after epoch 3) | rejected `Stale`; authority stays at epoch 3 |
+| Split brain (divergent views, forced and natural) | both claim; all converge on the lower agent; the higher steps down |
+| netem 0 / 2 / 5 % direct, 2 / 5 % relay-only (4 peers) | same results; `HostChanged` within 0.2 ms direct, 28.6 ms on the 5 % relay |
+| Cost | heartbeat 32 B (72 B with a real key) at 4 Hz per follower; host layer +1.8 % of one core for 8 in-process peers |
+
+Before relying on WP5, read the full limitations in ARCHITECTURE.md "Known limitations
+(WP5)": partitions, relay stalls versus `failure_timeout`, no rejoin, hostile claims, and
+AI continuity being the game's job.
