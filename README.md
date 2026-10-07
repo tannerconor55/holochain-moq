@@ -23,7 +23,8 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | 6C | Capture boundary (`VideoFrameSource`) + real V4L2 camera backend | **done** (hardware-independent tests pass; **physical-camera validation not run - no camera attached**) - `crates/video`, `crates/camera-v4l` |
 | 6D | Subscriber-driven keyframe recovery over MoQ | **done, tested** - `crates/realtime/src/recovery.rs`, `crates/codec-av1`, `crates/holochain-e2e/tests/keyframe_recovery.rs` |
 | 6D | Subscriber-driven keyframe recovery | **done, tested** - `crates/realtime/src/recovery.rs`, `crates/codec-av1` (`RecoveringDecoder`, encoder worker), `crates/holochain-e2e/tests/keyframe_recovery.rs` |
-| 7+ | Audio, relay, permissions, hardening | not started |
+| 7+ | Audio, relay, permissions, hardening | see CLAUDE.md for later stages; this table was not kept up to date past 6D |
+| WP1 spike | Transport decision for kart online: MoQ over iroh (direct + relay) | **spike done, decision proposed** - `prototypes/wp1-iroh-spike` (own workspace), ARCHITECTURE.md "Transport decision (WP1 spike)". Loopback only; **no NAT / real-network test run**; production crates unchanged |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before

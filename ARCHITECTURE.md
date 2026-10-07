@@ -46,7 +46,8 @@ conductor state.
 - Rust for the native networking layer.
 - [Cloudflare's `moq-rs`](https://github.com/cloudflare/moq-rs) (crates
   `moq-transport` 0.16.2, `moq-native-ietf` 0.10.0) for MoQ over QUIC,
-  targeting MoQT **draft-14**.
+  documented here as MoQT **draft-14**. The WP1 spike found that 0.16.2 actually
+  speaks a draft-16 style handshake (see "Transport decision (WP1 spike)").
 - A small internal abstraction (`holochain_moq_realtime::transport`)
   between the application and `moq-transport`, so the underlying
   implementation is replaceable later without touching call sites.
@@ -363,3 +364,175 @@ its session.
 Decoder-detected loss -> request on the subscriber's reverse MoQ control track -> publisher hub
 (coalesce + throttle) -> the single encoder forces a keyframe -> a new group. Entirely inside the
 realtime/media layers; Holochain, `protocol`, `node`, `hdk-bridge` and the DNA are not involved.
+
+## Transport decision (WP1 spike)
+
+Spike date 2026-10-07, branch `feat/wp1-wp2`, code in
+`prototypes/wp1-iroh-spike/` (its own Cargo workspace, so nothing below has
+entered the main workspace or its `Cargo.lock`). This answers open question 1
+of the kart-online design brief (section 8) and WP1's "evaluate in this order".
+
+### Decision
+
+**Option 1(b): move the data plane to moq-dev's `moq-net` over iroh, keeping
+the IETF wire dialect the existing code actually speaks (draft-16).** The move
+is **proposed, not done**: no production crate has changed. Option 1(a) is
+rejected without a fork. Option 2 (own relay and hole punching on quinn) is not
+needed, because 1(b) works.
+
+| Option | Verdict | Why |
+|---|---|---|
+| 1(a) Cloudflare `moq-transport` over `web-transport-iroh` | **Rejected (no fork)** | Not pluggable; see below |
+| 1(b) `moq-net` (+ `moq-tokio` helpers) over iroh | **Chosen** | Works direct and relay-only; talks to the existing publisher |
+| 2 Own relay + hole punching on quinn | Not pursued | Only worth doing if iroh is blocked, and it isn't |
+
+### Versions (checked live on crates.io, 2026-10-07)
+
+| Crate | Version | Note |
+|---|---|---|
+| `moq-transport` (Cloudflare) | 0.16.4 newest; **0.16.2 in use** | depends on concrete `web-transport ^0.10.4` |
+| `moq-native-ietf` | 0.10.0 | quinn 0.11 + `web-transport-quinn` 0.11 |
+| `moq-lite` | 0.17.0 | now a thin re-export of `moq-net` |
+| `moq-net` | **0.3.10** (spike) | speaks moq-lite 01-06 **and** IETF draft-14..22 |
+| `moq-native` | 0.20.0 | **deprecated**, replaced by `moq-tokio` |
+| `moq-tokio` | **0.19.23** (spike) | needs `web-transport-iroh ^0.7`, `web-transport-trait ^0.4` |
+| `iroh` / `iroh-relay` | **1.3.0** (spike) | QUIC is `noq` 1.3.0 (n0's fork), not quinn |
+| `web-transport-iroh` | 0.8.2 newest; **0.7.0** in spike | 0.8 implements `web-transport-trait` 0.5 and is not usable with moq-net 0.3.10 |
+| `quinn` | 0.11.12 | main workspace lockfile still has 0.11.9 |
+
+rustc 1.99.0, Linux 7.0.0. The moq-dev crates have been renamed or deprecated
+twice in five months (moq-lite → moq-net, moq-native → moq-tokio), and their
+trait versions are skewed against each other. Pin exact versions (`=`) when
+this lands.
+
+### Why 1(a) is impossible without a fork
+
+- `moq-transport` 0.16.x takes the **concrete** `web_transport::Session`
+  (`session/mod.rs`, `session/reader.rs`, `session/writer.rs`, `publisher.rs`,
+  `subscriber.rs`). It is not generic over a transport trait.
+- On native targets `web_transport` 0.10.9 is a newtype around
+  `web_transport_quinn::Session` (`web-transport-0.10.9/src/quinn.rs:109`),
+  which wraps upstream `quinn::Connection`.
+- `session/error.rs` pattern-matches `web_transport::quinn::{ReadError,
+  WriteError, SessionError, WebTransportError}` to classify graceful closes.
+- iroh 1.x runs on `noq`, not quinn, and `web-transport-iroh` implements
+  `web-transport-trait` (0.4/0.5), which `moq-transport` never uses.
+
+**Fork estimate.** 66 references to `web_transport` across 7 files, 15 of
+them quinn-specific, in a 24k-line crate. The fork would:
+
+1. make `Session`/reader/writer generic over `web_transport_trait::Session`
+   (or the poll variant);
+2. rewrite the error classification;
+3. replace `moq-native-ietf` (1,070 lines, 39 `quinn::` uses) with an iroh
+   connector;
+4. then be carried against an upstream that releases about weekly (0.16.3 and
+   0.16.4 shipped the day before this spike).
+
+That is roughly 1–2 weeks of work plus permanent rebase cost, for a result
+that 1(b) gets off the shelf.
+
+### Evidence (all real sockets, real QUIC, real MoQ, same process, loopback)
+
+`cargo test -- --test-threads=1 --nocapture` in `prototypes/wp1-iroh-spike`.
+There are 14 tests. All passed in 4 consecutive runs; the baseline test was
+added after the first 3 of those runs, so it has 4 runs of its own (3 alone,
+1 in the full suite).
+
+| Test | Shows |
+|---|---|
+| `direct_{draft14,draft16,lite}_carries_ordered_groups` | two iroh endpoints, relay disabled. 10 groups × 100 objects (48 B) at 2 ms: all 1,000 arrive, strictly ordered, each in its own group, all 10 groups in order. `ConnectionInfo.kind == Direct` |
+| `relay_only_{draft14,draft16,lite}_carries_ordered_groups` | **WP1 acceptance:** both endpoints have every IP transport removed (`clear_ip_transports`), and a real `iroh-relay` 1.3.0 runs in-process. Same 1,000 objects, same checks. `kind == Relayed` at start and at end |
+| `relay_and_direct_reports_the_selected_path` | production-like config. iroh picked `Direct` from the start, because Bob was given Alice's IP addresses. A relay→direct upgrade was **not** observed |
+| `rejects_the_wrong_endpoint_id_direct` | replaces `rejects_the_wrong_transport_identity`. Dialing Mallory's EndpointId at Alice's real address fails on both sides with `invalid peer certificate: UnknownIssuer`, and Alice then serves the real Bob |
+| `rejects_the_wrong_endpoint_id_relay` | same through the relay: no session. Note it surfaces as a **15 s timeout**, not a fast error (the relay has no client with that id) |
+| `one_session_carries_tracks_both_ways_over_the_relay` | one session, relay-only: Alice→Bob `alice/state` and Bob→Alice `bob/control`, 60 objects each, ordered. This is the reverse-control-track pattern WP2 needs |
+| `interop: moq_net_draft16_subscribes_to_the_existing_publisher` | moq-net client (noq backend, TLS **pinned** to the existing publisher's real SHA-256 fingerprint) subscribes to the unchanged `MoqLivePublication` fed by `GroupedSyntheticSource`. 40/40 `MediaObject`s, 8/8 groups, `MediaReport.ordered`, MoQ group id == `MediaObject.group`, keyframe flags intact |
+| `interop: moq_net_reverse_control_track_reaches_the_existing_hub` | moq-net publishes `moq-control/keyframe-request`. The existing publisher subscribes after the PUBLISH_NAMESPACE, and one `encode_request(42)` object reaches its `KeyframeRequests` hub (`received: 1, control_sessions: 1`) |
+| `interop: moq_net_draft14_does_not_interoperate_...` | **recorded negative:** draft-14 fails with `short buffer` |
+| `interop: baseline_existing_quinn_stack_latency` | the current stack end to end, same object size and cadence |
+
+**Correction to earlier docs.** README, PROTOCOL.md and this file call the
+current stack "MoQT draft-14". The bytes say otherwise: `moq-transport` 0.16.2
+sends a draft-16 style SETUP (message type 0x20, no version list, version
+agreed by ALPN / WT-Protocol `moqt-16`), and only moq-net's draft-16 talks to
+it. The existing tests were never affected, because both ends were the same
+library.
+
+**Measured (loopback, debug build, 48-byte objects, 2 ms cadence, 1,000
+objects per run, ranges over the 3–4 runs whose output was recorded).** The latency includes the subscriber
+task's wake-up.
+
+| Path | Connect (iroh dial + MoQ setup) | p50 | p95 | p99 | path RTT at end |
+|---|---|---|---|---|---|
+| Existing quinn + moq-transport 0.16.2 (baseline, one group per object) | n/a | 377–382 µs | 490–495 µs | 589–599 µs | n/a |
+| iroh direct, draft-16 | 21 ms | 405–432 µs | 547–660 µs | 667–834 µs | 0.4–0.6 ms |
+| iroh direct, moq-lite-06 | 11–12 ms | 418–445 µs | 568–659 µs | 678–786 µs | 0.5–2.3 ms |
+| iroh **relay-only**, draft-16 | 21–22 ms | 704–721 µs | 871–898 µs | 995–1122 µs | 1.8–5.5 ms |
+| iroh **relay-only**, moq-lite-06 | 11–12 ms | 701–713 µs | 880–896 µs | 1009–1038 µs | 1.6–1.9 ms |
+
+Read this as: iroh direct costs about +30–60 µs at p50 over today's stack on
+loopback; the in-process relay hop adds about +300 µs; moq-lite's handshake is
+one round trip shorter than draft-16's. The baseline uses one group per object
+and the iroh runs use 100 objects per group, so the per-object comparison is
+close but not identical. **None of these numbers say anything about real
+Internet RTTs or the relay's behaviour under load.**
+
+### What this does NOT show (untested)
+
+- **NAT traversal / hole punching.** Every endpoint is on one host. "Direct"
+  means two local sockets; "relayed" proves relay *forwarding* works, not that
+  iroh punches through home routers or carrier NAT. The brief's manual
+  two-network test (home network + mobile hotspot) has **not been run**.
+- A relay→direct path upgrade, and `ConnectionKindChanged`, were never
+  observed (the direct path won immediately).
+- A real, separately deployed `iroh-relay` (TLS with a real certificate, a
+  public address, more than one relay per lobby). The spike uses
+  `iroh::test_utils::run_relay_server` (self-signed; endpoints run with
+  `CaTlsConfig::insecure_skip_verify` *for the relay's certificate only*;
+  peer authentication is unaffected).
+- The existing *subscriber* (`MoqSubscribeNode`) against a moq-net
+  *publisher*. Only the reverse direction carries data from moq-net into the
+  old stack (the control track).
+- Loss, CPU cost, 8-peer scale and datagrams (these belong to WP3).
+
+### Impact if 1(b) is adopted
+
+- **Containment is good.** `moq-transport`, `moq-native-ietf` and
+  `web-transport` are used only inside `crates/realtime` (live.rs,
+  subscribe.rs, publish.rs, admission.rs, certs.rs, stats.rs). Every other
+  crate, including the media/AV1/camera/audio crates, goes through realtime's
+  own API. The migration therefore rewrites realtime's internals behind its
+  public surface, with realtime's 47 integration tests as the regression
+  suite. Media code should not need to change.
+- **Behaviour the existing contracts rely on, which must be re-verified
+  rather than assumed.** These are `moq-transport` 0.16.2 facts in
+  PROTOCOL.md.
+  - *Retention:* "a track keeps only the latest subgroup" vs moq-net's cache
+    and `max_age` (by default a new subscription gets only the latest group).
+    Re-run `retention.rs` and the late-join tests.
+  - *Clean vs failed end:* PUBLISH_DONE(TrackEnded) → `Ok(None)` vs moq-net's
+    track finish/abort. Re-run the `live_fanout` termination tests.
+  - *Fan-out and session limits:* moq-net's origin model replaces the
+    hand-rolled accept loop.
+  - *Control track:* the pattern works (interop test above), but the
+    "SUBSCRIBE only after PUBLISH_NAMESPACE" workaround may become unnecessary.
+  - *Admission (Stage 14F):* the challenge is SHA-256(QUIC connection id). On
+    iroh, the peer is already authenticated by EndpointId, so the binding step
+    changes. This needs a design decision, not a port.
+  - *Refusal close codes (15.2), `QuicPathStats`, and the 10 s idle timeout*
+    must be re-plumbed from iroh/noq.
+  - *Sub-groups:* moq-net supports only sub-group 0. The repo only ever uses
+    sub-group 0, so nothing is lost.
+- **Identity model changes (needs an explicit OK, it changes CLAUDE.md rules
+  5–7).** Transport identity becomes the iroh EndpointId (Ed25519 public key)
+  instead of the SHA-256 of a DER certificate. `protocol::TransportIdentity`,
+  the DNA endpoint entry (WP7: `iroh_node_id, relay_urls, direct_addrs?,
+  expires_at`) and `HolochainPeerDirectory` change with it. The binding is
+  still Holochain authorship of the endpoint entry.
+- **Incremental path exists.** Because moq-net's draft-16 interoperates with
+  the old publisher, crates can move one at a time over plain QUIC (moq-tokio
+  `noq`) before switching the transport underneath to iroh.
+- **Privacy (brief S6).** A direct iroh connection reveals each racer's IP
+  addresses to the others in the lobby; a relayed one reveals them to the
+  relay operator. The relay sees only QUIC ciphertext.
