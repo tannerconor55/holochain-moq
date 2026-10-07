@@ -487,5 +487,8 @@ impl PeerDirectory for HolochainPeerDirectory {
     }
 }
 
+pub mod lobby;
+pub use lobby::{parse_lobby_id, unix_now_ms, PresenceRefresher};
+
 #[cfg(test)]
 mod tests;

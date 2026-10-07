@@ -747,3 +747,130 @@ async fn a_conductor_failure_signing_the_proof_is_a_typed_error_not_a_panic() {
         .unwrap_err();
     assert!(matches!(err, DirectoryError::BackendConnectionFailed(_)));
 }
+
+// ---- WP7 lobby pre-checks: refused before any zome call ----
+
+fn lobby_id() -> String {
+    holo_hash::ActionHash::from_raw_32(vec![9; 32]).to_string()
+}
+
+fn iroh_ep() -> Endpoint {
+    Endpoint {
+        kind: EndpointKind::Iroh,
+        address: "relay:https://relay.example/".into(),
+        transport_identity: TransportIdentity {
+            fingerprint: [5; 32],
+        },
+    }
+}
+
+#[tokio::test]
+async fn lobby_records_that_validation_would_reject_never_reach_the_conductor() {
+    use holochain_moq_protocol::lobby::{
+        CreateLobbyInput, JoinLobbyInput, LobbyState, LobbyStatus, RaceResult,
+    };
+    let (d, s) = dir(Box::new(|f, _| {
+        unreachable!("no zome call expected, got {f}")
+    }));
+    let me = d.local_identity().await.unwrap();
+
+    let create = |max_players, character: &str, code: Option<&str>| CreateLobbyInput {
+        name: "Lobby".into(),
+        max_players,
+        track_id: "palm-cove".into(),
+        class: "50cc".into(),
+        laps: 2,
+        relay_urls: vec![],
+        character_id: character.into(),
+        invite_code: code.map(String::from),
+        endpoint: None,
+    };
+    for bad in [
+        create(9, "rex", None),
+        create(4, "wario", None),
+        create(4, "rex", Some("short")),
+    ] {
+        assert!(matches!(
+            d.create_lobby(bad).await.unwrap_err(),
+            DirectoryError::InvalidLobbyRecord(_)
+        ));
+    }
+    // Presence attached to a lobby call must be the caller's, and must expire.
+    let mut foreign = create(4, "rex", None);
+    foreign.endpoint = Some(EndpointAdvertisement {
+        peer_endpoint: PeerEndpoint {
+            agent: agent(2).to_string(),
+            endpoint: iroh_ep(),
+        },
+        published_at: 1,
+        expires_at: Some(2),
+    });
+    assert!(matches!(
+        d.create_lobby(foreign).await.unwrap_err(),
+        DirectoryError::EndpointAuthorMismatch { .. }
+    ));
+    let mut forever = create(4, "rex", None);
+    forever.endpoint = Some(EndpointAdvertisement {
+        peer_endpoint: PeerEndpoint {
+            agent: me.clone(),
+            endpoint: iroh_ep(),
+        },
+        published_at: 1,
+        expires_at: None,
+    });
+    assert!(matches!(
+        d.create_lobby(forever).await.unwrap_err(),
+        DirectoryError::InvalidLobbyRecord(_)
+    ));
+
+    let join = |lobby: String, character: &str| JoinLobbyInput {
+        lobby,
+        character_id: character.into(),
+        invite_code: None,
+        endpoint: None,
+    };
+    assert!(d
+        .join_lobby(join("not-a-hash".into(), "rex"))
+        .await
+        .is_err());
+    assert!(d.join_lobby(join(lobby_id(), "luigi")).await.is_err());
+    assert!(d.leave_lobby(&"uhCkk".to_string()).await.is_err());
+    assert!(d
+        .set_lobby_status(LobbyStatus {
+            lobby: lobby_id(),
+            state: LobbyState::Racing,
+            race_id: None,
+        })
+        .await
+        .is_err());
+    let err = d
+        .publish_result(RaceResult {
+            race_id: "r".into(),
+            lobby: lobby_id(),
+            player: agent(2).to_string(),
+            character_id: "rex".into(),
+            finish_ms: None,
+            best_lap_ms: None,
+            place: 1,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DirectoryError::ResultAuthorMismatch { .. }));
+    assert!(d
+        .presence(
+            iroh_ep(),
+            0,
+            holochain_moq_protocol::lobby::MAX_PRESENCE_TTL_MS + 1
+        )
+        .is_err());
+    assert!(s.calls.lock().unwrap().is_empty(), "nothing was sent");
+}
+
+#[test]
+fn lobby_ids_are_accepted_only_in_canonical_form() {
+    let id = lobby_id();
+    assert_eq!(parse_lobby_id(&id).unwrap().to_string(), id);
+    for bad in ["", "é", "uhCkk", "not a hash", &agent(1).to_string()] {
+        assert!(parse_lobby_id(bad).is_err(), "{bad:?}");
+    }
+}
