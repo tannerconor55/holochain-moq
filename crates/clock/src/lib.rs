@@ -23,7 +23,8 @@ pub use estimate::{
 };
 pub use race::{ClockStatus, RaceClock, StartConfig, StartOutcome};
 pub use sync::{
-    ClockError, ClockResponder, ClockSampler, ResponderStats, SamplerStats, SyncConfig, CLOCK_TRACK,
+    reply_track, ClockError, ClockResponder, ClockSampler, ResponderStats, SamplerStats,
+    SyncConfig, CLOCK_TRACK,
 };
 pub use time::{HostTime, LocalClock, LocalTime, OffsetToHost};
 pub use wire::{ClockMessage, ClockPing, ClockPong, WireError};

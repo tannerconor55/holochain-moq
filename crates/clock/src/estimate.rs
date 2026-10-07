@@ -18,8 +18,18 @@
 //! 1. drop impossible samples (negative RTT) at construction;
 //! 2. `best_rtt` = the smallest RTT seen;
 //! 3. keep samples with `rtt <= best_rtt + max(margin_abs, margin_rel * best_rtt)`;
-//! 4. offset = **median** of the kept samples' offsets;
-//! 5. error bound = (largest kept RTT) / 2.
+//! 4. if fewer than `min_samples` are kept but at least that many were
+//!    collected (a path where almost every sample is delayed, e.g. a lossy
+//!    relay with TCP head-of-line blocking), use the few kept ones anyway and
+//!    mark the estimate `degraded` (with fewer than `min_samples` collected
+//!    in total it is an error);
+//! 5. offset = **median** of the kept samples' offsets;
+//! 6. error bound = (largest kept RTT) / 2.
+//!
+//! An earlier version filled a degraded estimate up to `min_samples` with the
+//! next-lowest-RTT samples; on a lossy relay that pulled stalled samples into
+//! the median (a measured −54 ms error at 8 peers, 5 % netem). The kept
+//! window alone has far tighter bounds.
 
 use std::time::Duration;
 
@@ -111,6 +121,9 @@ pub struct ClockEstimate {
     pub error_bound_us: u64,
     pub samples_total: usize,
     pub samples_used: usize,
+    /// Fewer than `min_samples` samples were within the RTT window and only
+    /// those were used (step 4): fewer samples, each still bounded.
+    pub degraded: bool,
 }
 
 impl ClockEstimate {
@@ -125,6 +138,7 @@ impl ClockEstimate {
             error_bound_us: 0,
             samples_total: 0,
             samples_used: 0,
+            degraded: false,
         }
     }
 
@@ -171,13 +185,21 @@ pub fn estimate(
     let best = samples.iter().map(|s| s.rtt_us).min().ok_or(too_few(0))?;
     let margin = (cfg.margin_abs.as_micros() as u64).max((best as f64 * cfg.margin_rel) as u64);
     let limit = best.saturating_add(margin);
+    let need = cfg.min_samples.max(1);
     let kept: Vec<ClockSample> = samples
         .iter()
         .copied()
         .filter(|s| s.rtt_us <= limit)
         .collect();
-    if kept.len() < cfg.min_samples.max(1) {
-        return Err(too_few(kept.len()));
+    let mut degraded = false;
+    if kept.len() < need {
+        if total < need {
+            return Err(too_few(kept.len()));
+        }
+        // Enough evidence overall, but few healthy samples: use only the
+        // healthy ones. Each sample's true offset lies within its own +-rtt/2,
+        // so adding delayed samples would only widen (and bias) the result.
+        degraded = true;
     }
     let mut offsets: Vec<i64> = kept.iter().map(|s| s.offset_us).collect();
     let mut rtts: Vec<i64> = kept.iter().map(|s| s.rtt_us as i64).collect();
@@ -193,6 +215,7 @@ pub fn estimate(
         error_bound_us: max_rtt / 2,
         samples_total: total,
         samples_used: kept.len(),
+        degraded,
     })
 }
 
@@ -307,6 +330,53 @@ mod tests {
                 })
             ),
             "{r:?}"
+        );
+    }
+
+    /// A path where nearly every sample is delayed (the measured relay case):
+    /// only the in-window sample(s) are used, never the stalled ones.
+    #[test]
+    fn a_mostly_delayed_path_uses_only_its_healthy_samples() {
+        let v = [
+            s(1.5, 20.0),
+            s(31.0, 26.0),
+            s(35.0, 18.0),
+            s(42.0, 30.0),
+            s(38.0, 22.0),
+            s(120.0, 70.0),
+            s(300.0, 150.0),
+        ];
+        let e = estimate(&v, &EstimatorConfig::default()).unwrap();
+        assert!(e.degraded);
+        assert_eq!((e.samples_used, e.samples_total), (1, 7));
+        assert_eq!(
+            e.offset_to_host.as_millis_f64(),
+            20.0,
+            "the only healthy sample"
+        );
+        assert_eq!(
+            e.error_bound_us, 750,
+            "bounded by that sample's own rtt / 2"
+        );
+        // The real failure from the 8-peer 5 % relay run (p6): best 19.5 ms, stalls to 109 ms.
+        let p6 = [
+            s(19.5, 108.0),
+            s(23.0, 111.0),
+            s(109.0, 56.0),
+            s(140.0, 40.0),
+            s(98.0, 60.0),
+            s(130.0, 30.0),
+        ];
+        let e = estimate(&p6, &EstimatorConfig::default()).unwrap();
+        assert!(
+            (e.offset_to_host.as_millis_f64() - 109.5).abs() < 2.0,
+            "{:?}",
+            e.offset_to_host
+        );
+        assert!(e.error_bound_us <= 11_500);
+        assert!(
+            estimate(&v[..1], &EstimatorConfig::default()).is_err(),
+            "fewer samples than min collected: still an error"
         );
     }
 

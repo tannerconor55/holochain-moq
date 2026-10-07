@@ -1,17 +1,18 @@
 //! Clock sampling over the mesh.
 //!
 //! ```text
-//! peer (ClockSampler)                         host (ClockResponder)
-//!   race/<r>/<peer>/clock   Latest ── ClockPing{nonce, seq, t0} ──▶ t1 = now
-//!                                                                    t2 = now
-//!   t3 = now  ◀── ClockPong{nonce, seq, t0, t1, t2} ── race/<r>/<host>/clock   Latest
+//! peer P (ClockSampler)                               host (ClockResponder)
+//!   race/<r>/<P>/clock        Latest ── ClockPing{nonce, seq, t0} ──▶ t1 = now
+//!                                                                       t2 = now
+//!   t3 = now  ◀── ClockPong{nonce, seq, t0, t1, t2} ── race/<r>/<host>/clock/<P>   Latest
 //! ```
 //!
-//! Both tracks are `Latest`: a lost or late sample is simply missing, and
-//! never delays a newer one. Every pong goes to every peer on the host's one
-//! clock track; a sampler keeps only pongs with its own `nonce`, a `seq` it is
-//! still waiting for, and the `t0` it sent. Nothing here calls a directory
-//! or Holochain.
+//! Both directions are `Latest`: a lost or late sample is simply missing and
+//! never delays a newer one. Each peer has its **own reply track** on the host
+//! (`clock/<agent>`), so peers' pongs never compete for one reader queue
+//! (a shared track lost 25 % of samples at 8 peers in testing). A sampler
+//! accepts a pong only with its own `nonce`, a `seq` it is still waiting
+//! for, and the `t0` it sent. Nothing here calls a directory or Holochain.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -24,18 +25,22 @@ use holochain_moq_mesh::{
     DeliveryMode, MeshError, MeshSession, MeshTransport, TrackName, TrackPublisher,
     TrackSubscription,
 };
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::estimate::{estimate, ClockEstimate, ClockSample, EstimateError, EstimatorConfig};
 use crate::time::LocalClock;
 use crate::wire::{ClockMessage, ClockPing, ClockPong};
 
-/// The track name used by both sides (`race/<race>/<agent>/clock`).
+/// A peer's ping track (`race/<race>/<agent>/clock`).
 pub const CLOCK_TRACK: &str = "clock";
 
 fn clock_track() -> TrackName {
     TrackName::new(CLOCK_TRACK).expect("valid track name")
+}
+
+/// The host's reply track for `peer` (`race/<race>/<host>/clock/<peer>`).
+pub fn reply_track(peer: &str) -> Result<TrackName, MeshError> {
+    TrackName::new(format!("{CLOCK_TRACK}/{peer}"))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +76,12 @@ impl From<EstimateError> for ClockError {
 /// every bound is a parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyncConfig {
-    /// Pings to send.
+    /// Pings to send in the first round.
     pub samples: u32,
+    /// If too few samples survive filtering (e.g. a relay stall hit several
+    /// in a row), keep sampling in rounds of `samples / 2` up to this many
+    /// pings in total, within `overall_timeout`.
+    pub max_samples: u32,
     /// Gap between pings.
     pub interval: Duration,
     /// A ping not answered within this is counted lost (its RTT would be
@@ -82,18 +91,26 @@ pub struct SyncConfig {
     pub overall_timeout: Duration,
     /// Samples with a larger RTT are discarded before estimation.
     pub max_rtt: Option<Duration>,
+    /// Keep sampling (within `max_samples` / `overall_timeout`) until the
+    /// estimate's error bound is at most this. Not met in the end: the
+    /// estimate is still returned, with its honest bound and quality.
+    pub target_error_bound: Option<Duration>,
     pub estimator: EstimatorConfig,
 }
 
 impl Default for SyncConfig {
-    /// 16 samples, 50 ms apart (0.8 s), each allowed 1 s, the whole sync 5 s.
+    /// 16 samples, 50 ms apart (0.8 s); if the estimate is degraded or its
+    /// error bound is above 10 ms, more rounds up to 96 samples; each sample
+    /// allowed 1 s, the whole sync 10 s.
     fn default() -> Self {
         Self {
             samples: 16,
+            max_samples: 96,
             interval: Duration::from_millis(50),
             sample_timeout: Duration::from_secs(1),
-            overall_timeout: Duration::from_secs(5),
+            overall_timeout: Duration::from_secs(10),
             max_rtt: Some(Duration::from_secs(1)),
+            target_error_bound: Some(Duration::from_millis(10)),
             estimator: EstimatorConfig::default(),
         }
     }
@@ -104,8 +121,11 @@ impl Default for SyncConfig {
 pub struct SamplerStats {
     pub pings_sent: u64,
     pub pongs_matched: u64,
-    /// Pongs for another sampler (nonce) - normal on the shared track.
+    /// Pongs carrying another sampler's nonce (a previous sampler on the
+    /// same reply track).
     pub pongs_for_others: u64,
+    /// Extra sampling rounds run because too few samples were healthy.
+    pub extra_rounds: u64,
     /// Pongs for a seq already answered.
     pub duplicates: u64,
     /// Pongs for a seq that had already timed out, or whose t0 did not match.
@@ -113,6 +133,8 @@ pub struct SamplerStats {
     /// Undecodable messages, or impossible timestamps.
     pub malformed: u64,
     pub timed_out: u64,
+    /// Pings sent before the first pong arrived (not counted in the budget).
+    pub warmup_pings: u64,
     pub over_max_rtt: u64,
 }
 
@@ -146,7 +168,7 @@ impl ClockSampler {
         clock: LocalClock,
     ) -> Result<Self, ClockError> {
         let pings = mesh.publish(clock_track(), DeliveryMode::Latest)?;
-        let pongs = mesh.subscribe(host, clock_track(), DeliveryMode::Latest)?;
+        let pongs = mesh.subscribe(host, reply_track(mesh.local_agent())?, DeliveryMode::Latest)?;
         Ok(Self {
             clock,
             nonce: random_u64(),
@@ -162,7 +184,12 @@ impl ClockSampler {
     }
 
     /// Collect samples, then estimate. Never returns a made-up offset: either
-    /// an estimate built from enough healthy samples, or an error.
+    /// an estimate built from enough samples, or an error.
+    ///
+    /// Pings are sent every `interval`. Until the first pong arrives they are
+    /// warm-up (path not yet proven live) and do not count towards
+    /// `samples`; if none is ever answered, the result after
+    /// `overall_timeout` is [`ClockError::NoResponse`].
     pub async fn sync(&mut self, cfg: &SyncConfig) -> Result<ClockEstimate, ClockError> {
         let started = Instant::now();
         let deadline = started + cfg.overall_timeout;
@@ -170,6 +197,8 @@ impl ClockSampler {
         let mut answered: Vec<u32> = Vec::new();
         let mut samples: Vec<ClockSample> = Vec::new();
         let mut sent: u32 = 0;
+        let mut warmup_this_sync: u32 = 0;
+        let mut target = cfg.samples.min(cfg.max_samples.max(cfg.samples));
         let mut next_send = Instant::now();
         loop {
             // Expire unanswered pings.
@@ -181,18 +210,28 @@ impl ClockSampler {
                 }
                 alive
             });
-            if sent == cfg.samples && pending.is_empty() {
-                break;
+            if sent >= target && pending.is_empty() {
+                // Enough healthy samples? If not, and budget remains, sample more.
+                let target_us = cfg
+                    .target_error_bound
+                    .map_or(u64::MAX, |d| d.as_micros() as u64);
+                let healthy = estimate(&self.filtered(&samples, cfg), &cfg.estimator)
+                    .is_ok_and(|e| !e.degraded && e.error_bound_us <= target_us);
+                let budget = cfg.max_samples.max(cfg.samples);
+                // Extra rounds only help a host that answers; zero answers ends it.
+                if healthy || samples.is_empty() || target >= budget || Instant::now() >= deadline {
+                    break;
+                }
+                target = (target + (cfg.samples / 2).max(1)).min(budget);
+                self.stats.extra_rounds += 1;
+                next_send = Instant::now();
+                continue;
             }
             if now >= deadline {
                 self.stats.timed_out += pending.len() as u64;
                 break;
             }
-            let wake = if sent < cfg.samples {
-                next_send
-            } else {
-                deadline
-            };
+            let wake = if sent < target { next_send } else { deadline };
             let soonest_expiry = pending
                 .values()
                 .map(|(_, at)| *at + cfg.sample_timeout)
@@ -209,28 +248,36 @@ impl ClockSampler {
                     }
                 }
                 _ = tokio::time::sleep_until(wake) => {
-                    if sent < cfg.samples && Instant::now() >= next_send {
+                    if sent < target && Instant::now() >= next_send {
                         let seq = self.next_seq;
                         self.next_seq = self.next_seq.wrapping_add(1);
                         let t0 = self.clock.now().0;
                         self.pings.send(ClockPing { nonce: self.nonce, seq, t0 }.encode().to_vec())?;
                         pending.insert(seq, (t0, Instant::now()));
                         self.stats.pings_sent += 1;
-                        sent += 1;
+                        // Warm-up: until the first pong proves the path (and both
+                        // subscriptions) live, pings do not count towards the
+                        // budget; under loss, subscription setup can take
+                        // seconds and datagrams sent before it are dropped.
+                        if samples.is_empty() {
+                            self.stats.warmup_pings += 1;
+                            warmup_this_sync += 1;
+                        } else {
+                            sent += 1;
+                        }
                         next_send += cfg.interval;
                     }
                 }
             }
         }
         if samples.is_empty() {
-            return Err(ClockError::NoResponse { sent });
+            return Err(ClockError::NoResponse {
+                sent: sent + warmup_this_sync,
+            });
         }
         let total = samples.len();
-        if let Some(max) = cfg.max_rtt {
-            let max = max.as_micros() as u64;
-            samples.retain(|s| s.rtt_us <= max);
-            self.stats.over_max_rtt += (total - samples.len()) as u64;
-        }
+        let samples = self.filtered(&samples, cfg);
+        self.stats.over_max_rtt += (total - samples.len()) as u64;
         let mut e = estimate(&samples, &cfg.estimator).map_err(|err| match err {
             EstimateError::TooFewSamples { kept, need, .. } => {
                 ClockError::TooFewSamples { kept, total, need }
@@ -239,6 +286,15 @@ impl ClockSampler {
         e.samples_total = total;
         tracing::debug!(?e, "clock estimate");
         Ok(e)
+    }
+
+    fn filtered(&self, samples: &[ClockSample], cfg: &SyncConfig) -> Vec<ClockSample> {
+        let max = cfg.max_rtt.map_or(u64::MAX, |m| m.as_micros() as u64);
+        samples
+            .iter()
+            .copied()
+            .filter(|s| s.rtt_us <= max)
+            .collect()
     }
 
     fn on_pong(
@@ -308,44 +364,37 @@ impl Drop for ClockResponder {
 }
 
 impl ClockResponder {
-    /// Publish the host's clock track and answer the pings of every peer
-    /// connected now. (Peers joining later are not covered: race setup runs
-    /// on a complete mesh.)
+    /// Answer the pings of every peer connected now, each on its own reply
+    /// track. (Peers joining later are not covered: race setup runs on a
+    /// complete mesh.) `t1` is taken on receipt and `t2` just before the
+    /// send, in the same task.
     pub fn start<T: MeshTransport>(
         mesh: &MeshSession<T>,
         clock: LocalClock,
     ) -> Result<Self, ClockError> {
-        let mut pongs = mesh.publish(clock_track(), DeliveryMode::Latest)?;
         let stats = Arc::new(ResponderStats::default());
-        // One writer owns the publisher, so t2 is taken right before each send.
-        let (tx, mut rx) = mpsc::channel::<(ClockPing, u64)>(256);
-        let st = stats.clone();
-        let mut tasks = vec![tokio::spawn(async move {
-            while let Some((ping, t1)) = rx.recv().await {
-                let t2 = clock.now().0.max(t1);
-                let pong = ClockPong {
-                    nonce: ping.nonce,
-                    seq: ping.seq,
-                    t0: ping.t0,
-                    t1,
-                    t2,
-                };
-                if pongs.send(pong.encode().to_vec()).is_ok() {
-                    st.pongs.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        })];
+        let mut tasks = Vec::new();
         for peer in mesh.peers().into_iter().filter(|p| p.connected) {
+            let mut reply = mesh.publish(reply_track(&peer.agent)?, DeliveryMode::Latest)?;
             let mut sub = mesh.subscribe(&peer.agent, clock_track(), DeliveryMode::Latest)?;
-            let (tx, st) = (tx.clone(), stats.clone());
+            let st = stats.clone();
             tasks.push(tokio::spawn(async move {
                 while let Ok(Some(b)) = sub.recv().await {
                     let t1 = clock.now().0;
                     match ClockMessage::decode(&b) {
                         Ok(ClockMessage::Ping(p)) => {
                             st.pings.fetch_add(1, Ordering::Relaxed);
-                            // Full channel: drop (clock samples are disposable).
-                            let _ = tx.try_send((p, t1));
+                            let t2 = clock.now().0.max(t1);
+                            let pong = ClockPong {
+                                nonce: p.nonce,
+                                seq: p.seq,
+                                t0: p.t0,
+                                t1,
+                                t2,
+                            };
+                            if reply.send(pong.encode().to_vec()).is_ok() {
+                                st.pongs.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         _ => {
                             st.malformed.fetch_add(1, Ordering::Relaxed);

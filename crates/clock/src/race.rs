@@ -68,6 +68,9 @@ pub struct ClockStatus {
     pub samples_used: usize,
     pub samples_total: usize,
     pub quality: ClockQuality,
+    /// The estimate had to use the lowest-RTT samples beyond the normal
+    /// window (a heavily delayed path); see `ClockEstimate::degraded`.
+    pub degraded: bool,
     /// The path to the host, if the caller passes it (from `MeshSession::peers`).
     pub kind: Option<ConnectionKind>,
 }
@@ -139,6 +142,7 @@ impl RaceClock {
             samples_used: e.samples_used,
             samples_total: e.samples_total,
             quality: e.quality(),
+            degraded: e.degraded,
             kind,
         }
     }
