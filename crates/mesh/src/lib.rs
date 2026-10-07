@@ -17,10 +17,12 @@
 //! calls a directory, before or during delivery.
 
 pub mod error;
+pub mod session;
 pub mod transport;
 pub mod types;
 
 pub use error::MeshError;
+pub use session::{dials, DialPolicy, MeshConfig, MeshSession, TrackPublisher, TrackSubscription};
 pub use transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 pub use types::{
     ConnectionKind, DeliveryMode, LinkInfo, MeshEvent, PeerBinding, PeerStatus, RejectReason, Role,
