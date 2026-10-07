@@ -657,3 +657,133 @@ never calls a directory or Holochain, before or during delivery.
 | Local relay: real `iroh-relay` in-process on 127.0.0.1, IP transports removed | **tested** (4 and 8 peers) |
 | Real Internet path between two machines | **not tested** |
 | Real NAT traversal / hole punching (home router, mobile hotspot, CGNAT) | **not tested** |
+
+## Game delivery over MoQ (WP3)
+
+```text
+kart-net (future)                 kart-wire (crates/kart-wire): KartState 42 B, Event 12 B + payload
+   │ publish(track, Latest | ReliableOrdered) / subscribe(peer, track, mode)    (opaque bytes)
+   ▼
+MeshSession (crates/mesh)         contract + bounds enforced here (payload size, history caps)
+   ▼
+IrohMeshTransport (crates/mesh-iroh)
+   ├─ Latest          → moq-net track datagrams (OBJECT_DATAGRAM)
+   └─ ReliableOrdered → moq-net groups of 64 objects, one QUIC stream each
+   ▼
+moq-net 0.3.10 (IETF draft-16) / iroh 1.2.0
+```
+
+Holochain is not on this path. `crates/mesh` and `crates/mesh-iroh` have no Holochain
+dependency (`crates/mesh/tests/boundaries.rs`), and the directory-backed identity test
+still counts 0 directory calls during delivery. `kart-wire` has no dependencies, and the
+mesh does not depend on it.
+
+### Latest: why datagrams
+
+Three moq-net primitives were evaluated, all measured on the same harness:
+
+| Carrier | What happens on loss | Memory | Measured |
+|---|---|---|---|
+| **Track datagram per object** (chosen) | the tick is gone; the next one 33 ms later supersedes it | publisher ≤64 datagrams/track (moq-net), reader ≤4 | netem 5 % (2 peers): 95 % received, p95 0.69–0.70 ms / p99 0.78 ms |
+| Group (one QUIC stream) per object (WP2's carrier) | retransmitted on its stream, so stale state arrives late and is then discarded | publisher keeps groups for `max_age` (set to 500 ms) | netem 5 %: 99.3–99.5 % received, but p99 31 ms (each retransmit costs ~30 ms); 8 peers at 0 % loss: +30 % p50, +36 % CPU, +4.6 MiB RSS per process |
+| One persistent group (one stream) | head-of-line blocking: every later object waits for the retransmit | the newest group is never evicted, so the whole history stays in memory (WP2's defect) | the ReliableOrdered numbers below are this mechanism: p99 28–31 ms at 2–5 % loss |
+
+Datagrams are the native MoQ primitive for "newest wins": no stream per object, no
+retransmission, and no publisher-side growth. The cost is the ~1200-byte datagram limit
+(`LATEST_MAX_PAYLOAD` = 1024 B), which a 42-byte kart state does not come close to. The
+stream carrier stays selectable (`IrohConfig::latest_carrier`) for paths without
+datagram support. The reader handles either.
+
+### ReliableOrdered: why rotating groups, and the bounded policy
+
+- **One group per 64 objects.** Each group is one QUIC stream: ordered and
+  retransmitted. Rotation keeps every stream short, and a long race doesn't
+  pin one ever-growing group.
+- **Late joiners.** On the IETF wire a moq-net subscription is a *live join*
+  at the publisher's current group. We found this empirically: a late
+  subscriber got nothing, and moq-net's `ietf/subscriber.rs` `subscribe_join`
+  explains why. The reader therefore calls `fetch_group(n)` for every group
+  before the first live one. A late subscriber is thus replayed from object 0
+  across group boundaries; tested with 5 groups, then live.
+- **Reordering and gaps.** Groups on separate streams can arrive out of
+  order, so the reader holds up to 8 pending groups and delivers strictly in
+  sequence. A group that can't be fetched, or never arrives, is a reported
+  error, never a silent gap.
+- **History bound (per publisher track, i.e. per race):**
+  - 16,384 objects;
+  - 1 MiB of payload;
+  - groups older than 30 min may be evicted (moq-net `max_age`).
+
+  Past the object or byte cap the publisher refuses (`MeshError::HistoryFull`)
+  rather than forgetting. Sizing: a 3-lap race takes ~3 min. A racer produces
+  on the order of 100 events and a host publishing AI events ~1,000, so the
+  cap is >10× the host and the byte cap allows 64 B per event at the object
+  cap. Memory is released when the track or mesh is dropped; 10 consecutive
+  races kept RSS flat.
+- **Dedupe.** `kart-wire::EventSequence` checks the envelope `seq`. The mesh
+  already guarantees exactly-once in order, and this is the game layer's own
+  check.
+
+### Bandwidth: where the bytes go (8 peers, 30 Hz state + 10 Hz events, all-to-all)
+
+Measured packet sizes through the proxy (`tests/overhead.rs`):
+- **Data packets:** each 42 B state datagram is an 84–85 B UDP payload, i.e.
+  43 B of QUIC header, AEAD tag, DATAGRAM frame and MoQ object header.
+- **ACK packets:** the receiver sends one ~37 B ACK-only packet per data
+  packet. At a 33 ms cadence every packet arrives after the ACK delay
+  expires, so each is acknowledged on its own.
+- **IPv4/UDP:** adds 28 B per packet.
+
+Per peer that is about 30.6–31.2 KB/s of QUIC payload out (≈42.7–43.4 KB/s
+counting IP/UDP headers), against 10.0 KB/s of application payload: a ≈4.3×
+overhead factor. That is **under the 50 KB/s target**, so nothing was optimised.
+
+If it matters later, the levers are:
+- sending state at 20 Hz;
+- coalescing state and events into one datagram;
+- QUIC ACK-frequency negotiation.
+
+Relay-only counts are QUIC packets; the relay's own HTTPS/WebSocket framing
+is not included.
+
+### Known limitations (WP3)
+
+- **Loopback only.** Every number above comes from one machine: the direct
+  path is local UDP, and the relay is an in-process `iroh-relay` on 127.0.0.1.
+  No real Internet path, remote relay or NAT has been measured.
+- **Loss is injected with kernel `netem`.** Loss is `tc netem loss p% seed 7`
+  on the loopback of a private, unprivileged network namespace, so every
+  packet of every path is subject to it: direct UDP, the relay's TCP, and
+  handshakes.
+  - *Why not the first harness:* that was a userspace UDP proxy on the
+    direct path. Its own check found iroh's in-band NAT traversal can route
+    around such a proxy: in one run A received 626 packets and only 136 came
+    through it. So no proxy-based loss numbers are reported.
+  - *What netem is not:* it drops packets independently and uniformly.
+    Real paths have bursty and correlated loss, jitter and reordering, none
+    of which is modelled.
+- **Relay path under loss: TCP head-of-line blocking.** iroh's relay
+  forwards QUIC packets over a TCP connection (HTTPS/WebSocket) to the relay.
+  With loss on that TCP leg:
+  - TCP retransmits, so QUIC sees no loss (0–3 lost packets) but long
+    stalls;
+  - `Latest` p95/p99 rose to 72/199 ms at 2 % and 213/575 ms at 5 %
+    (8 peers), against 0.4/0.6 ms direct;
+  - the reader then receives bursts (queue reaches its cap of 4) and skips
+    to the newest.
+
+  This is a property of iroh's relay transport, not of the mesh. It makes the
+  direct path (hole punching, WP1) and relay placement/selection (WP6/M2)
+  matter for gameplay. Not mitigated in WP3.
+- **The datagram carrier needs datagram support on every hop.** iroh direct
+  and iroh-relay carry QUIC datagrams. A future WebSocket/TCP fallback would
+  silently drop them; that is why the stream carrier stays selectable.
+- **No pacing or congestion tuning.** Bursts are absorbed by dropping: the
+  burst test sent 100,000 objects and the subscriber saw 16,644, with 4
+  queued. No adaptive rate.
+- **Datagram size is not probed per path.** `LATEST_MAX_PAYLOAD` (1024 B) is
+  a static bound.
+- **No reconnect (WP6), no authorization (WP8), no rate limits (WP9).** A peer
+  could still flood a reader's queue, which stays bounded, or open
+  subscriptions to tracks that never exist; those queue in moq-net's
+  `Dynamic` and are unbounded per hostile peer.

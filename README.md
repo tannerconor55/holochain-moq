@@ -26,6 +26,7 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | 7+ | Audio, relay, permissions, hardening | see CLAUDE.md for later stages; this table was not kept up to date past 6D |
 | WP1 spike | Transport decision for kart online: MoQ over iroh (direct + relay) | **spike done, decision proposed** - `prototypes/wp1-iroh-spike` (own workspace), ARCHITECTURE.md "Transport decision (WP1 spike)". Loopback only; **no NAT / real-network test run**; media crates unchanged; adopted for the game mesh in WP2 |
 | WP2 | Symmetric game mesh: `MeshSession` over `MeshTransport`, iroh + moq-net (draft-16), AgentPubKey <-> iroh EndpointId binding | **done, tested on loopback + local relay** - `crates/mesh`, `crates/mesh-iroh`. **No real-network / NAT test run**; no reconnect (WP6) |
+| WP3 | Game delivery contracts (`Latest` over MoQ datagrams, bounded `ReliableOrdered` with replay), `kart-wire` v1 format, loss/latency/bandwidth/CPU measurements | **done, tested locally** (loopback direct, local relay, kernel netem loss in a private network namespace) - `crates/kart-wire`, `crates/mesh-iroh` (`tests/delivery.rs`, `examples/mesh_bench.rs`). **Not tested over the Internet or through NAT** |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before
@@ -844,3 +845,80 @@ say nothing about Internet latency, and the relay is local.
   builds cannot enable it.
 - **Agent keys must be a single MoQ path segment** (no `/`), which
   Holochain's URL-safe base64 keys are.
+
+## WP3: game delivery contracts, wire format, measurements
+
+| | `Latest` (kart state) | `ReliableOrdered` (race events) |
+|---|---|---|
+| MoQ primitive | track datagram per object | groups of 64 objects, rotated |
+| Loss | allowed; newest wins; stale discarded | none; ordered; replayed from object 0 for late joiners |
+| Bounds | 1 KiB payload; reader queue 4 (drop-oldest); publisher ≤64 datagrams | 4 KiB payload; ≤16384 objects / 1 MiB per race track (then `HistoryFull`); reader queue 1024 (backpressure) |
+
+Wire format v1 (`crates/kart-wire`, PROTOCOL.md "WP3"): big-endian, 42-byte `KartState`,
+12-byte event envelope (`version, type, seq, tick, len`) + nine minimal event payloads.
+Golden vectors in `crates/kart-wire/fixtures/golden.json`.
+
+```bash
+cargo test -p holochain-moq-kart-wire                                   # wire format, golden bytes, 200k garbage sweep
+cargo test -p holochain-moq-mesh-iroh --test delivery -- --test-threads=1 --nocapture   # contracts, netem loss 0/2/5 %, memory (needs unprivileged userns + tc)
+cargo test -p holochain-moq-mesh-iroh --test overhead -- --nocapture    # per-packet byte breakdown
+cargo run --release -p holochain-moq-mesh-iroh --features test-utils --example mesh_bench -- --peers 8 --secs 60 --mode direct
+cargo run --release -p holochain-moq-mesh-iroh --features test-utils --example mesh_bench -- --peers 8 --secs 60 --mode relay
+cargo run --release -p holochain-moq-mesh-iroh --features test-utils --example mesh_bench -- --peers 8 --secs 60 --mode direct --netem-loss 5
+(cd prototypes/wp1-iroh-spike && cargo test --test interop -- --test-threads=1)            # moq-transport interop incl. WP3 additions
+```
+
+**Measured: multi-process (one OS process per peer), release, 60 s, state 30 Hz + events
+10 Hz all-to-all, LOOPBACK.** Ranges cover the runs recorded (8 peers: 2 runs each; 4 peers: 1 run).
+
+| Peers / path | Latest sent / received / skipped | Latest p50 / p95 / p99 | Reliable sent / received / dup / reorder | Reliable p50 / p95 / p99 | Out per peer (QUIC / +IP,UDP) | CPU per process | RSS per process |
+|---|---|---|---|---|---|---|---|
+| 4 direct | 21600 / 21600 / 0 | 145 / 238 / 287 µs | 7200 / 7200 / 0 / 0 | 160 / 252 / 297 µs | 12.7 / 17.9 KB/s | 2.0 % | 23 MiB |
+| 4 relay-only | 21600 / 21600 / 0 | 255 / 426 / 519 µs | 7200 / 7200 / 0 / 0 | 274 / 438 / 514 µs | 11.8 / 16.8 KB/s | 2.7 % | 24 MiB |
+| 8 direct | 100800 / 100800 / 0 | 201–205 / 406–411 / 556–559 µs | 33600 / 33600 / 0 / 0 | 249–257 / 507–508 / 630–633 µs | 30.6–31.2 / 42.7–43.4 KB/s | 3.5 % | 25 MiB |
+| 8 relay-only | 100800 / 100800 / 0 | 297–415 / 552–793 / 723–986 µs | 33600 / 33600 / 0 / 0 | 345–526 / 644–897 / 840–1083 µs | 27.4–27.8 / 39.3–40.0 KB/s | 4.4–4.6 % | 26 MiB |
+
+Effective received rate was 30.00 Hz on every directed pair, and the most `Latest`
+objects ever queued was 1 (cap 4). Application payload was 10.0 KB/s out per peer at 8
+peers; the **< 50 KB/s per peer target is met** (≈43 KB/s on the wire). See
+ARCHITECTURE.md "Bandwidth: where the bytes go".
+
+**Measured: injected loss.** Kernel `netem loss p% seed 7` on the loopback of a private
+unprivileged network namespace, so every path is lossy, including the relay's TCP.
+
+In-process, 2 peers, direct, 20 s (debug build; `tests/delivery.rs`):
+
+| netem | Latest received / sent | Latest p50 / p95 / p99 | Reliable received / sent | Reliable p50 / p95 / p99 |
+|---|---|---|---|---|
+| 0 % | 600 / 600 (30.1 Hz) | 480–513 / 666–674 / 783–796 µs | 200 / 200, in order, 0 dup | 578 / 697 / 838 µs |
+| 2 % | 587–589 / 600 (29.4–29.5 Hz) | 463–557 / 721–782 / 812–950 µs | 200 / 200, in order, 0 dup | 583–594 / 787–968 / 30031–30569 µs |
+| 5 % | 570–571 / 600 (28.5–28.6 Hz) | 459–510 / 674–701 / 777–787 µs | 200 / 200, in order, 0 dup | 595–621 / 884–28585 / 30741–31186 µs |
+| 5 %, stream-per-object `Latest` (comparison) | 596–597 / 600 | 662–859 / 980–1521 / 31272–31348 µs | 200 / 200 | — |
+
+Multi-process (one process per peer), release, 60 s, state 30 Hz + events 10 Hz all-to-all:
+
+| Peers / path / netem | Latest sent / received / skipped | min pair rate | Latest p50 / p95 / p99 | Reliable received / sent, dup, reorder | Reliable p50 / p95 / p99 |
+|---|---|---|---|---|---|
+| 4 direct 2 % | 21600 / 21175 / 425 | 29.28 Hz | 142 / 244 / 296 µs | 7200 / 7200, 0, 0 | 146 / 239 / 28761 µs |
+| 4 direct 5 % | 21600 / 20525 / 1075 | 28.22 Hz | 144 / 273 / 351 µs | 7200 / 7200, 0, 0 | 175 / 464 / 30145 µs |
+| 8 direct 2 % | 100800 / 98775 / 2025 | 29.17 Hz | 204 / 408 / 556 µs | 33600 / 33600, 0, 0 | 242 / 549 / 28438 µs |
+| 8 direct 5 % | 100800 / 95808 / 4992 | 28.02 Hz | 207 / 402 / 537 µs | 33600 / 33600, 0, 0 | 252 / 965 / 29964 µs |
+| 8 relay-only 2 % | 100800 / 100342 / 458 | 29.65 Hz | 299 / **72386 / 199256** µs | 33600 / 33600, 0, 0 | 357 / 77359 / 196631 µs |
+| 8 relay-only 5 % | 100800 / 95110 / 5690 | 27.48 Hz | 424 / **212704 / 574672** µs | 33600 / 33600, 0, 0 | 596 / 338654 / 615101 µs |
+
+On the direct path `Latest` loses about the injected fraction and its latency does not move.
+`ReliableOrdered` stays complete, ordered and duplicate-free; a retransmit costs ~30 ms at p99.
+
+On the relay path iroh carries QUIC over TCP to the relay, so loss there becomes TCP
+head-of-line stalls of hundreds of ms for **both** modes (QUIC itself sees 0–3 lost
+packets). See ARCHITECTURE.md "Known limitations (WP3)".
+
+### Known limitations (WP3)
+
+- **Loopback only.** Local UDP and an in-process relay; no Internet path, remote relay or NAT measured.
+- **Loss model is uniform, independent netem loss on one host.** No bursty or correlated loss, jitter or reordering, and no real access network. A userspace proxy was tried first; iroh's NAT traversal routed around it, so it is used only for the byte-size analysis.
+- **Relay path under loss: TCP head-of-line blocking** (iroh relays QUIC over TCP): `Latest` p99 0.2–0.6 s at 2–5 % netem with 8 peers. This makes direct paths and relay placement important (WP1/WP6); it is not mitigated here.
+- **Datagrams need datagram support on every hop.** A stream carrier remains selectable for paths without it.
+- **No pacing or congestion adaptation.** Bursts are shed: 16,644 of 100,000 burst objects reached the subscriber, which held at most 4.
+- **No reconnect (WP6), authorization (WP8), or hostile-peer rate limits (WP9).** Subscriptions to never-published tracks queue in moq-net without a bound.
+- **Untested:** CPU and RSS are per-process figures from `/proc` (Linux only) and not heap-profiled; JavaScript decoding of the golden vectors is not tested yet.

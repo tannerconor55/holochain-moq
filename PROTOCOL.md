@@ -788,3 +788,104 @@ hostile-peer hardening beyond bounding keyframe work.
 the 32-byte EndpointId, and `address` holds the `IrohHints` text form: space-separated
 `relay:<url>` and `ip:<socket addr>` tokens, at most 4 relays, 16 direct
 addresses and 2,048 bytes. Game payload framing is not defined yet (WP3).
+
+## WP3: game delivery and wire format
+
+### Track naming
+
+`race/<race_id>/<source>/<track>`, mapped to MoQ as broadcast `race/<race_id>/<source>`
+and track `<track>`.
+
+| Part | Rule |
+|---|---|
+| `race_id` | ASCII letters, digits, `-`, `_`; 1–32 bytes. One mesh carries one race. |
+| `source` | a player's `AgentPubKey` base64 text (letters, digits, `-`, `_`, ≤64 bytes, not starting `ai-`), or `ai-<slot>` for an AI kart (published by the host) |
+| `track` | `state` (Latest) and `events` (ReliableOrdered) today; ASCII alnum plus `-_./`, ≤64 bytes |
+
+Examples: `race/abc123/uhCAk…A/state`, `race/abc123/ai-3/state`, `race/abc123/uhCAk…B/events`.
+Race events are per publisher (each peer's own `events` track), never a source-less
+`race/<id>/events`, so WP8 can authorize every track by its source. A subscription reads
+only the broadcast its path names, over the session with the peer that serves it.
+
+### Delivery modes
+
+| | `Latest` | `ReliableOrdered` |
+|---|---|---|
+| Use | kart state, AI state (20–30 Hz) | race events |
+| MoQ primitive | one OBJECT_DATAGRAM per object (moq-net `append_datagram`) | groups of 64 objects (`create_group`, rotated by count); one QUIC stream per group |
+| Loss | an object may be lost; never retransmitted | none: QUIC retransmits within a stream |
+| Order | strictly increasing transport sequence at the reader (anything not newer than the newest delivered is discarded as `stale`) | publish order; the reader reorders groups that arrive on concurrent streams |
+| Buffering | publisher: moq-net keeps ≤64 datagrams per track (drop-oldest); reader: ≤4 objects, drop-oldest (`dropped_overflow`) | reader: ≤1024 objects, then backpressure (nothing dropped) |
+| Late subscriber | sees the next object sent | replayed from object 0: the live subscription joins at the publisher's current group, and the reader `fetch_group`s every earlier one |
+| History bound | none kept | ≤16384 objects and ≤1 MiB payload per track (publisher refuses beyond: `HistoryFull`); groups older than 30 min may be evicted; a missing group is an error at the reader, never a silent gap |
+| Max payload | 1024 B (one datagram on any path) | 4096 B |
+| Sequence | moq-net per-track sequence (`MeshObject.seq`), diagnostics only | `group * 64 + index`, contiguous from 0 |
+| Subscribe before publish | allowed: the publisher holds a moq-net `Dynamic` per broadcast, so an early SUBSCRIBE queues until `create_track` | same |
+
+The peer's session must exist before `subscribe` (a subscription is made over a
+session); a subscription to a track that does not exist yet simply has no data until
+the track is published.
+
+### Wire format, version 1 (`crates/kart-wire`)
+
+All integers **big-endian**, floats IEEE-754 binary32 big-endian, no padding, no
+dependence on any language's memory layout. Golden vectors:
+`crates/kart-wire/fixtures/golden.json`.
+
+**KartState** (Latest track `state`), exactly 42 bytes:
+
+| Offset | Size | Field | Range |
+|---|---|---|---|
+| 0 | 1 | `version` | 1 |
+| 1 | 1 | `flags` | bit0 airborne, 1 drifting, 2 drift right, 3 boosting, 4 star, 5 shrunk, 6 spinning, 7 finished |
+| 2 | 4 | `tick` | u32 simulation tick (60 Hz) |
+| 6 | 12 | `pos` | 3 × f32, metres, Y up; finite |
+| 18 | 12 | `vel` | 3 × f32, m/s; finite |
+| 30 | 4 | `heading` | f32 radians; finite |
+| 34 | 1 | `drift` | 0–3 |
+| 35 | 1 | `item` | 0 none, 1 mushroom, 2 triple mushroom, 3 banana, 4 green shell, 5 red shell, 6 star, 7 lightning, 8 blue shell |
+| 36 | 1 | `itemCount` | 0–3 |
+| 37 | 1 | `lap` | u8 |
+| 38 | 4 | `trackT` | f32 in [0, 1) |
+
+42 bytes rather than the brief's "~48": the brief's field list sums to 42 and padding
+would only cost bandwidth. The publisher is the track's source, not a field.
+
+**Event envelope** (ReliableOrdered track `events`): 12-byte header + payload.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | `version` = 1 |
+| 1 | 1 | `type` (0 reserved/invalid) |
+| 2 | 4 | `seq` u32: 0, 1, 2, … per (race, publisher); the dedupe key (`EventSequence`) |
+| 6 | 4 | `tick` u32: the simulation tick the event belongs to |
+| 10 | 2 | `len` u16: payload bytes, ≤1024 |
+| 12 | `len` | payload |
+
+| Type | Name | Payload (bytes) |
+|---|---|---|
+| 1 | RaceStart (host) | `start_at_ms` u64 (host clock), `seed` u64, `laps` u8, `class` u8, `track_id_len` u8 (≤32) + ASCII, `grid_len` u8 (≤8) + slots (`0` + 39-byte AgentPubKey, or `1` + AI slot u8) |
+| 2 | HostChanged (host) | `new_host` 39-byte AgentPubKey (39) |
+| 3 | ItemPickup | `box_index` u16, `pickup_index` u16, `item` u8 (5) |
+| 4 | ItemUse | `item` u8, 1–8 (1) |
+| 5 | ProjectileSpawn | `projectile_id` u32, `kind` u8, `pos` 3×f32, `vel` 3×f32, `target_slot` u8 (0xff none) (30) |
+| 6 | Hit (victim) | `kind` u8, `by_slot` u8, `projectile_id` u32 (6) |
+| 7 | Lap | `lap` u8, `lap_ms` u32 (5) |
+| 8 | Finish | `finish_ms` u32, `best_lap_ms` u32 (0xffffffff none) (8) |
+| 9 | Leave | `reason` u8 (1) |
+
+### Versioning and malformed input
+
+- An unknown `version` is rejected (`UnknownVersion`), never interpreted.
+- A kart state of any length other than 42 is rejected (`Truncated` / `TrailingBytes`).
+- An event whose `len` exceeds 1024 is rejected from the header alone, before any
+  payload is touched (`PayloadTooLarge`); a known fixed-size type with the wrong
+  `len` is `WrongPayloadLength`; bytes after `len` are `TrailingBytes`.
+- NaN or infinite floats are `NonFinite`; out-of-range enums/levels/`trackT` are `OutOfRange`.
+- **An unknown event type** (any `type` this decoder does not know) decodes as
+  `Unknown { type, payload }`, bounded by `len`, so a receiver skips and counts it.
+  Types are only ever added; changing an existing type's payload requires a new version.
+- Decoding never panics (200 000-input deterministic sweep) and every accepted input
+  re-encodes to the same bytes.
+- Sanity checks beyond the format (speed limits, lap jumps, event authority, rate
+  limits) are game/hardening work (brief S4, WP9), not the decoder's.
