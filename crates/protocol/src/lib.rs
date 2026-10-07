@@ -24,7 +24,10 @@ pub use admission::{
 };
 pub use advertisement::{live_endpoints, AdvertisementError, EndpointAdvertisement, Freshness};
 pub use capability::{AccessPolicy, Capability, Policy};
-pub use endpoint::{AgentPubKeyB64, Endpoint, EndpointKind, PeerEndpoint, TransportIdentity};
+pub use endpoint::{
+    AgentPubKeyB64, Endpoint, EndpointKind, IrohHints, IrohHintsError, PeerEndpoint,
+    TransportIdentity, MAX_IROH_ADDRESS_LEN, MAX_IROH_DIRECT_ADDRS, MAX_IROH_RELAYS,
+};
 pub use peer::Peer;
 pub use session::{resolve_sessions, Session, SessionError, SessionId, SessionState};
 pub use stream::{Stream, StreamId, StreamKind, StreamLifecycle};

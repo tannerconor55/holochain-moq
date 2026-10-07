@@ -31,3 +31,5 @@ bytes = { workspace = true }
 holochain-moq-mesh-iroh = { path = ".", features = ["test-utils"] }
 iroh = { workspace = true, features = ["test-utils"] }
 tracing-subscriber = { workspace = true }
+# Identity tests resolve the roster through the real PeerDirectory interface.
+holochain-moq-node = { workspace = true }

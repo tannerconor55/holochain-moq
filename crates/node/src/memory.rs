@@ -9,7 +9,8 @@
 use crate::{directory::PeerDirectory, error::DirectoryError};
 use async_trait::async_trait;
 use holochain_moq_protocol::{
-    resolve_sessions, AgentPubKeyB64, Peer, PeerEndpoint, Session, Stream, StreamId,
+    resolve_sessions, AgentPubKeyB64, Endpoint, EndpointKind, Peer, PeerEndpoint, Session, Stream,
+    StreamId,
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -25,8 +26,9 @@ use tokio::sync::RwLock;
 #[derive(Debug, Default)]
 struct State {
     peers: HashMap<AgentPubKeyB64, Peer>,
-    /// Address -> owning agent, so a second agent can't silently take over
-    /// an address the first agent already published an endpoint at.
+    /// Ownership key ([`owner_key`]) -> owning agent, so a second agent can't
+    /// silently take over an address (or, for iroh, a transport identity) the
+    /// first agent already published.
     endpoint_owners: HashMap<String, AgentPubKeyB64>,
     streams: HashMap<StreamId, Stream>,
     /// Every published version of every session, oldest first (append-only, like the DNA).
@@ -58,6 +60,11 @@ struct State {
 ///    endpoint (e.g. a fresh certificate on restart, per
 ///    `TransportIdentity`'s doc comment) is allowed and simply replaces
 ///    the prior record.
+///    For an `EndpointKind::Iroh` endpoint the owned thing is the transport
+///    identity (the iroh EndpointId), not the address: the address is only
+///    dial hints, and agents sharing a relay legitimately share hints. So two
+///    agents can never both claim the same iroh EndpointId, while a key's
+///    owner may republish it with new hints.
 /// 3. **Stream ownership** - the same idea, for stream advertisements
 ///    (`DirectoryError::StreamOwnershipConflict`).
 ///
@@ -132,10 +139,11 @@ impl PeerDirectory for InMemoryPeerDirectory {
 
         let mut state = self.state.write().await;
 
-        if let Some(existing_owner) = state.endpoint_owners.get(&endpoint.endpoint.address) {
+        let key = owner_key(&endpoint.endpoint);
+        if let Some(existing_owner) = state.endpoint_owners.get(&key) {
             if existing_owner != &endpoint.agent {
                 return Err(DirectoryError::EndpointOwnershipConflict {
-                    address: endpoint.endpoint.address.clone(),
+                    address: key,
                     existing_owner: existing_owner.clone(),
                     attempted_owner: endpoint.agent.clone(),
                 });
@@ -143,7 +151,7 @@ impl PeerDirectory for InMemoryPeerDirectory {
         }
         state
             .endpoint_owners
-            .insert(endpoint.endpoint.address.clone(), endpoint.agent.clone());
+            .insert(key.clone(), endpoint.agent.clone());
 
         let now = now_millis();
         let peer = state
@@ -160,8 +168,7 @@ impl PeerDirectory for InMemoryPeerDirectory {
         // Alice regenerating her certificate on restart, see
         // `TransportIdentity`'s doc comment) replaces the stale record
         // rather than accumulating duplicates.
-        peer.endpoints
-            .retain(|e| e.address != endpoint.endpoint.address);
+        peer.endpoints.retain(|e| owner_key(e) != key);
         peer.endpoints.push(endpoint.endpoint);
 
         Ok(())
@@ -210,6 +217,15 @@ impl InMemoryPeerDirectory {
     /// The sessions as a reader sees them: one per id, resolved from the versions.
     pub(crate) async fn resolved_sessions(&self) -> Vec<Session> {
         resolve_sessions(self.state.read().await.sessions.clone())
+    }
+}
+
+/// What an endpoint's ownership is keyed on: the address, except for iroh
+/// endpoints, whose owned thing is the EndpointId.
+fn owner_key(endpoint: &Endpoint) -> String {
+    match endpoint.kind {
+        EndpointKind::Iroh => format!("iroh:{}", endpoint.transport_identity.to_hex()),
+        EndpointKind::Direct | EndpointKind::Relay => endpoint.address.clone(),
     }
 }
 
@@ -396,6 +412,79 @@ mod tests {
         }
         let streams = alice.list_streams().await.unwrap();
         assert_eq!(streams.len(), 2);
+    }
+
+    fn iroh(key: u8, address: &str) -> Endpoint {
+        Endpoint {
+            kind: EndpointKind::Iroh,
+            address: address.to_string(),
+            transport_identity: identity(key),
+        }
+    }
+
+    /// WP2: one iroh EndpointId belongs to at most one agent, even when the
+    /// claimant uses different dial hints.
+    #[tokio::test]
+    async fn two_agents_cannot_claim_the_same_iroh_endpoint_id() {
+        let alice = InMemoryPeerDirectory::new("alice");
+        let mallory = alice.as_agent("mallory");
+        alice
+            .publish_endpoint(PeerEndpoint {
+                agent: "alice".into(),
+                endpoint: iroh(7, "relay:https://r/"),
+            })
+            .await
+            .unwrap();
+        let err = mallory
+            .publish_endpoint(PeerEndpoint {
+                agent: "mallory".into(),
+                endpoint: iroh(7, "ip:10.0.0.9:1"),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DirectoryError::EndpointOwnershipConflict { existing_owner, attempted_owner, .. }
+                if existing_owner == "alice" && attempted_owner == "mallory"),
+            "{err:?}"
+        );
+        let found = alice.find_peer(&"mallory".to_string()).await.unwrap();
+        assert!(found.is_none(), "nothing stored for the claimant");
+    }
+
+    /// Agents sharing a relay share hint strings; that is not a conflict, and
+    /// an owner republishing its key with new hints replaces the old record.
+    #[tokio::test]
+    async fn iroh_ownership_is_keyed_on_the_endpoint_id_not_the_hints() {
+        let alice = InMemoryPeerDirectory::new("alice");
+        let bob = alice.as_agent("bob");
+        let hints = "relay:https://shared-relay/";
+        alice
+            .publish_endpoint(PeerEndpoint {
+                agent: "alice".into(),
+                endpoint: iroh(1, hints),
+            })
+            .await
+            .unwrap();
+        bob.publish_endpoint(PeerEndpoint {
+            agent: "bob".into(),
+            endpoint: iroh(2, hints),
+        })
+        .await
+        .unwrap();
+        alice
+            .publish_endpoint(PeerEndpoint {
+                agent: "alice".into(),
+                endpoint: iroh(1, "relay:https://shared-relay/ ip:10.0.0.1:5"),
+            })
+            .await
+            .unwrap();
+        let a = alice
+            .find_peer(&"alice".to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.endpoints.len(), 1, "republished, not accumulated");
+        assert!(a.endpoints[0].address.ends_with("ip:10.0.0.1:5"));
     }
 
     #[tokio::test]

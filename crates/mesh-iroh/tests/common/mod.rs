@@ -30,8 +30,9 @@ pub fn direct() -> Reach {
 }
 
 pub fn config(reach: Reach) -> IrohConfig {
+    let relay = !matches!(reach, Reach::DirectOnly);
     let mut c = IrohConfig::new(reach);
-    c.insecure_relay_tls = true; // the in-process test relay is self-signed
+    c.insecure_relay_tls = relay; // the in-process test relay is self-signed
     c
 }
 

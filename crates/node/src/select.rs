@@ -17,6 +17,10 @@ use thiserror::Error;
 pub enum SelectError {
     #[error("no {kind:?} endpoint is advertised")]
     NoEndpointOfKind { kind: EndpointKind },
+    /// An iroh endpoint is for the mesh transport (`holochain-moq-mesh-iroh`),
+    /// never for this crate's quinn/moq-transport path.
+    #[error("a {kind:?} endpoint cannot be dialled by the realtime (quinn) transport")]
+    UnsupportedKind { kind: EndpointKind },
     #[error("endpoint address {address:?} cannot be dialled: {source}")]
     InvalidAddress {
         address: String,
@@ -45,6 +49,11 @@ pub fn transport_path(endpoint: &Endpoint) -> Result<TransportPath, SelectError>
     let kind = match endpoint.kind {
         EndpointKind::Direct => PathKind::Direct,
         EndpointKind::Relay => PathKind::Relay,
+        EndpointKind::Iroh => {
+            return Err(SelectError::UnsupportedKind {
+                kind: endpoint.kind,
+            })
+        }
     };
     TransportPath::new(kind, &endpoint.address, endpoint.transport_identity).map_err(|source| {
         SelectError::InvalidAddress {

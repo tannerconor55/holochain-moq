@@ -27,6 +27,119 @@ pub enum EndpointKind {
     /// fingerprint of the *relay's* certificate. Only the representation exists:
     /// no relay protocol (routing, credentials) is defined here.
     Relay,
+    /// An iroh endpoint carrying the symmetric game mesh (kart-online WP2).
+    ///
+    /// * `transport_identity.fingerprint` is the endpoint's **iroh EndpointId**:
+    ///   its 32-byte Ed25519 public key, which iroh authenticates in every
+    ///   handshake. It is *not* a certificate hash for this kind.
+    /// * `address` is the dial hints in the [`IrohHints`] text form (relay URLs
+    ///   and optional direct socket addresses). Hints only help reach the key;
+    ///   they are not what is authenticated.
+    ///
+    /// The `AgentPubKey` <-> EndpointId binding is, as for every kind, the
+    /// Holochain authorship of the `PeerEndpoint` entry naming it.
+    Iroh,
+}
+
+/// Maximum relay URLs in one [`IrohHints`].
+pub const MAX_IROH_RELAYS: usize = 4;
+/// Maximum direct socket addresses in one [`IrohHints`].
+pub const MAX_IROH_DIRECT_ADDRS: usize = 16;
+/// Maximum length of an encoded [`IrohHints`] address string.
+pub const MAX_IROH_ADDRESS_LEN: usize = 2048;
+
+/// How to reach an iroh endpoint: the `address` of an [`EndpointKind::Iroh`]
+/// endpoint.
+///
+/// Text form: space-separated tokens `relay:<url>` and `ip:<socket addr>`,
+/// relays first, e.g. `relay:https://relay.example/ ip:192.0.2.7:4433`.
+/// Tokens are not parsed further here (no URL or socket parsing in this
+/// wasm-shared crate); the transport crate parses them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IrohHints {
+    pub relay_urls: Vec<String>,
+    pub direct_addrs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrohHintsError {
+    TooLong,
+    TooManyRelays,
+    TooManyDirectAddrs,
+    Empty,
+    BadToken(String),
+}
+
+impl fmt::Display for IrohHintsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLong => write!(f, "iroh address longer than {MAX_IROH_ADDRESS_LEN} bytes"),
+            Self::TooManyRelays => write!(f, "more than {MAX_IROH_RELAYS} relay URLs"),
+            Self::TooManyDirectAddrs => {
+                write!(f, "more than {MAX_IROH_DIRECT_ADDRS} direct addresses")
+            }
+            Self::Empty => write!(
+                f,
+                "an iroh address needs at least one relay URL or direct address"
+            ),
+            Self::BadToken(t) => write!(f, "unrecognised iroh address token {t:?}"),
+        }
+    }
+}
+
+impl std::error::Error for IrohHintsError {}
+
+impl IrohHints {
+    pub fn to_address(&self) -> Result<String, IrohHintsError> {
+        self.check()?;
+        let s = self
+            .relay_urls
+            .iter()
+            .map(|u| format!("relay:{u}"))
+            .chain(self.direct_addrs.iter().map(|a| format!("ip:{a}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if s.len() > MAX_IROH_ADDRESS_LEN {
+            return Err(IrohHintsError::TooLong);
+        }
+        Ok(s)
+    }
+
+    pub fn parse(address: &str) -> Result<Self, IrohHintsError> {
+        if address.len() > MAX_IROH_ADDRESS_LEN {
+            return Err(IrohHintsError::TooLong);
+        }
+        let mut hints = Self::default();
+        for token in address.split(' ').filter(|t| !t.is_empty()) {
+            if let Some(url) = token.strip_prefix("relay:").filter(|u| !u.is_empty()) {
+                hints.relay_urls.push(url.to_string());
+            } else if let Some(addr) = token.strip_prefix("ip:").filter(|a| !a.is_empty()) {
+                hints.direct_addrs.push(addr.to_string());
+            } else {
+                return Err(IrohHintsError::BadToken(token.to_string()));
+            }
+        }
+        hints.check()?;
+        Ok(hints)
+    }
+
+    fn check(&self) -> Result<(), IrohHintsError> {
+        if self.relay_urls.len() > MAX_IROH_RELAYS {
+            return Err(IrohHintsError::TooManyRelays);
+        }
+        if self.direct_addrs.len() > MAX_IROH_DIRECT_ADDRS {
+            return Err(IrohHintsError::TooManyDirectAddrs);
+        }
+        if self.relay_urls.is_empty() && self.direct_addrs.is_empty() {
+            return Err(IrohHintsError::Empty);
+        }
+        for t in self.relay_urls.iter().chain(&self.direct_addrs) {
+            if t.is_empty() || t.contains(char::is_whitespace) {
+                return Err(IrohHintsError::BadToken(t.clone()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A single advertised way to reach a peer's realtime transport, with
@@ -45,6 +158,9 @@ pub struct Endpoint {
 
 /// A TLS certificate fingerprint identifying one MoQ/QUIC transport
 /// endpoint, bound to a Holochain `AgentPubKey` via [`PeerEndpoint`].
+///
+/// **Exception: [`EndpointKind::Iroh`].** For that kind the 32 bytes are the
+/// iroh EndpointId (Ed25519 public key) itself, not a hash; see that variant.
 ///
 /// **Exactly what this is a hash of, and why:** the SHA-256 digest of the
 /// peer's *entire DER-encoded X.509 certificate* - not just its public key
@@ -113,4 +229,55 @@ impl fmt::Display for TransportIdentity {
 pub struct PeerEndpoint {
     pub agent: AgentPubKeyB64,
     pub endpoint: Endpoint,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iroh_hints_round_trip() {
+        let h = IrohHints {
+            relay_urls: vec!["https://relay.example/".into()],
+            direct_addrs: vec!["192.0.2.7:4433".into(), "[2001:db8::1]:4433".into()],
+        };
+        let a = h.to_address().unwrap();
+        assert_eq!(
+            a,
+            "relay:https://relay.example/ ip:192.0.2.7:4433 ip:[2001:db8::1]:4433"
+        );
+        assert_eq!(IrohHints::parse(&a).unwrap(), h);
+        let relay_only = IrohHints::parse("relay:https://r/").unwrap();
+        assert!(relay_only.direct_addrs.is_empty());
+    }
+
+    #[test]
+    fn iroh_hints_reject_garbage_and_excess() {
+        assert_eq!(IrohHints::parse("").unwrap_err(), IrohHintsError::Empty);
+        assert!(matches!(
+            IrohHints::parse("tcp:1.2.3.4:1"),
+            Err(IrohHintsError::BadToken(_))
+        ));
+        assert!(matches!(
+            IrohHints::parse("relay:"),
+            Err(IrohHintsError::BadToken(_))
+        ));
+        let many = (0..=MAX_IROH_RELAYS)
+            .map(|i| format!("relay:https://r{i}/"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            IrohHints::parse(&many).unwrap_err(),
+            IrohHintsError::TooManyRelays
+        );
+        assert_eq!(
+            IrohHints::parse(&"x".repeat(MAX_IROH_ADDRESS_LEN + 1)).unwrap_err(),
+            IrohHintsError::TooLong
+        );
+        let spaced = IrohHints {
+            relay_urls: vec!["a b".into()],
+            direct_addrs: vec![],
+        };
+        assert!(spaced.to_address().is_err());
+    }
 }

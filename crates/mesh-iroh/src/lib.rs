@@ -16,6 +16,7 @@
 //! (from the control plane): iroh's own address lookup (n0 DNS/pkarr) and the
 //! default n0 relays are never configured.
 
+pub mod record;
 mod session;
 mod track;
 
@@ -30,6 +31,7 @@ use iroh::endpoint::{presets, Connection, QuicTransportConfig, VarInt};
 use moq_net::{broadcast, origin, Version, Versions};
 
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
+pub use record::{iroh_addr, iroh_addr_for, iroh_endpoint};
 pub use session::IrohMoqSession;
 pub use track::{LATEST_QUEUE, RELIABLE_QUEUE};
 
