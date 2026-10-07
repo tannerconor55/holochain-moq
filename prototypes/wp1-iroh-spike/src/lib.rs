@@ -66,6 +66,9 @@ pub fn connection_info(conn: &Connection) -> Option<ConnectionInfo> {
 pub fn draft14() -> Version {
     "moq-transport-14".parse().expect("moq-net knows draft-14")
 }
+pub fn draft16() -> Version {
+    "moq-transport-16".parse().expect("moq-net knows draft-16")
+}
 pub fn lite() -> Version {
     // moq-lite-06 is the newest non-WIP lite version in moq-net 0.3.10.
     "moq-lite-06".parse().expect("moq-net knows moq-lite-06")

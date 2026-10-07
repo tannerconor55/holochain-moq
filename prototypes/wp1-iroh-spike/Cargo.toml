@@ -19,3 +19,9 @@ anyhow = "1"
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Interop check only: the repo's existing moq-transport 0.16.2 publisher.
+holochain-moq-realtime = { path = "../../crates/realtime" }
+holochain-moq-protocol = { path = "../../crates/protocol" }
+url = "2"

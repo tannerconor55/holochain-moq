@@ -112,6 +112,30 @@ async fn direct_lite_carries_ordered_groups() -> Result<()> {
     Ok(())
 }
 
+/// draft-16 is what the existing moq-transport 0.16.2 stack actually speaks
+/// (see tests/interop.rs), so it is the dialect a migration would keep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_draft16_carries_ordered_groups() -> Result<()> {
+    init_tracing();
+    let mut o = transfer(Reach::DirectOnly, Reach::DirectOnly, draft16(), false).await?;
+    report("direct draft-16", &mut o);
+    assert_complete(&o);
+    assert_eq!(o.info_at_end.unwrap().kind, ConnectionKind::Direct);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_only_draft16_carries_ordered_groups() -> Result<()> {
+    init_tracing();
+    let (map, _url, _relay) = iroh::test_utils::run_relay_server().await?;
+    let mut o = transfer(Reach::RelayOnly(map.clone()), Reach::RelayOnly(map), draft16(), true).await?;
+    report("relay-only draft-16", &mut o);
+    assert_complete(&o);
+    assert_eq!(o.info_at_start.unwrap().kind, ConnectionKind::Relayed);
+    assert_eq!(o.info_at_end.unwrap().kind, ConnectionKind::Relayed);
+    Ok(())
+}
+
 /// WP1 acceptance: direct dialing disabled (no IP transports at all on either
 /// side), so every byte crosses the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
