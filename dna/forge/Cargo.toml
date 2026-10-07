@@ -1,0 +1,22 @@
+[package]
+name = "moq_directory_forge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# TEST ONLY. A coordinator that commits arbitrary entries and links, so tests
+# can prove the *integrity* zome rejects forged records the honest coordinator
+# never produces. Packed only into dna/workdir/forge (test DNA); never part of
+# workdir/dna.yaml or the hApp.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "moq_directory_forge"
+
+[dependencies]
+hdk = { workspace = true }
+serde = { workspace = true }
+holochain_serialized_bytes = "0.0.57"
+holochain-moq-protocol = { workspace = true }
+moq_directory_integrity = { path = "../integrity" }

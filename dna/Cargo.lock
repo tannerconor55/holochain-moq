@@ -486,6 +486,7 @@ dependencies = [
  "ed25519-dalek",
  "serde",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 
@@ -711,10 +712,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq_directory_forge"
+version = "0.1.0"
+dependencies = [
+ "hdk",
+ "holochain-moq-protocol",
+ "holochain_serialized_bytes",
+ "moq_directory_integrity",
+ "serde",
+]
+
+[[package]]
 name = "moq_directory_integrity"
 version = "0.1.0"
 dependencies = [
  "hdi",
+ "holo_hash",
  "holochain-moq-protocol",
  "holochain_serialized_bytes",
  "serde",

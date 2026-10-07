@@ -26,3 +26,5 @@ __pycache__/
 # Local development certificates
 dev/certs/
 crates/screenshare/scripts/browser/dev/certs/
+# Test-only forge DNA (dna/workdir/forge/dna.yaml), packed by the e2e tests
+dna/workdir/forge/*.dna

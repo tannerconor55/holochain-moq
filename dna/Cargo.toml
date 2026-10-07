@@ -3,7 +3,9 @@
 # build for a different target with different flags. See PROTOCOL.md.
 [workspace]
 resolver = "2"
-members = ["integrity", "coordinator"]
+# `forge` is a TEST-ONLY coordinator (see forge/Cargo.toml), packed only into
+# workdir/forge/dna.yaml.
+members = ["integrity", "coordinator", "forge"]
 
 [workspace.package]
 edition = "2021"
