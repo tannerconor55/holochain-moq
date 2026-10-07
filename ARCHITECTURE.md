@@ -991,3 +991,202 @@ has no dependency on iroh, MoQ, TLS, Holochain or kart-wire, which
   higher epoch and it will be adopted.
 - **kart-wire `HostChanged` (event type 2) is not the authority mechanism** and carries
   no epoch. The host crate's `HostChanged` is.
+
+## Lobby control plane (WP7)
+
+WP7 extends the existing `moq_directory` DNA; it does not add a second DNA or a second
+presence system. The lobby records live beside the peer/endpoint/stream/session records,
+follow the same conventions (shared types in `crates/protocol` with agents and hashes as
+base64 text, entries that wrap them, authorship as the identity binding, append-only) and
+are reached through the same bridge (`HolochainPeerDirectory`).
+
+```text
+                                   Holochain (moq_directory DNA)
+create_lobby ─▶ Lobby ──LobbyBucket(path kart.lobbies.<hour>)        list_open_lobbies
+join_lobby   ─▶ LobbyJoin  ─┐                                       get_lobby ─▶ LobbyView {
+leave_lobby  ─▶ LobbyLeave ─┼─ Lobby→Join / Lobby→Leave / Lobby→Status     lobby, status,
+set_lobby_status ─▶ LobbyStatus ┘                                          members + endpoint ads,
+publish_result ─▶ RaceResult ──Agent→Result, LeaderboardBand               wait list }
+presence     ─▶ PeerEndpointEntry (existing; iroh ads must expire) ─Agent→Endpoint
+                                   │ race setup: one get_lobby snapshot
+                                   ▼
+            roster = members' live iroh endpoints ─▶ MeshSession ─▶ HostSession ─▶ race
+                                   (zero Holochain calls from here until the race ends)
+```
+
+### Data model
+
+| Entry | Fields (see `protocol::lobby`) | Author rule |
+|---|---|---|
+| `LobbyEntry` | `Lobby { name, host, max_players, track_id, class, laps, relay_urls, access }` | `host` = author |
+| `LobbyJoinEntry` | `LobbyJoin { lobby, player, character_id, invite_proof }` | `player` = author |
+| `LobbyLeaveEntry` | `LobbyLeave { lobby, player }` | `player` = author |
+| `LobbyStatusEntry` | `LobbyStatus { lobby, state, race_id }` | author = the referenced lobby's author |
+| `RaceResultEntry` | `RaceResult { race_id, lobby, player, character_id, finish_ms, best_lap_ms, place }` | `player` = author |
+
+Adaptations from the brief's sketch, each deliberate:
+
+- **No `created_at` field.** A lobby's creation time is its creating action's timestamp,
+  which is signed and cannot disagree with an entry field (the Holochain convention).
+- **References are `LobbyId` text** (the base64 `ActionHash` of the lobby's create
+  action), like `AgentPubKeyB64`, so `protocol` stays free of `holo_hash`. Validation
+  accepts only the canonical form, screens the shape first (holo_hash 0.7.0's parser
+  panics on empty or non-ASCII text; a forged reference must be a clean rejection), and
+  resolves it with `must_get_valid_record`.
+- **`LobbyAccess::InviteCode { salt, verify_key }`** instead of a bare hash; see
+  "Invite codes".
+- **`LobbyLeave`** is a separate entry; the DNA is append-only, so leaving is a record,
+  not a deletion.
+- **Character, class and track are closed sets**: the eight racers of
+  `turbo-kart-rally/src/config.js`, `50cc|100cc|150cc`, and the tracks in
+  `protocol::lobby::TRACKS` (only `palm-cove` today).
+
+### Validation (integrity zome, deterministic)
+
+All rules are checked from the op itself plus `must_get_valid_record` of the referenced
+lobby; nothing reads the clock, current membership, or mutable state.
+
+- **Bounds**: name 1–32 characters (≤ 128 bytes, no control or bidi-override characters,
+  no outer whitespace), `max_players` 2–8, `laps` 1–5, `track_id` ≤ 32 bytes and known,
+  `class` ≤ 8 bytes and known, ≤ 4 relay URLs of ≤ 256 bytes (`http(s)://`, no
+  whitespace), character id ≤ 16 bytes and known, `race_id` 1–32 of `[A-Za-z0-9_-]` (the
+  mesh `RaceId` rule), `place` 1–8, invite proof exactly 64 bytes, invite key a valid
+  Ed25519 point.
+- **Authority**: the author rules in the table. `LobbyStatus` resolves the referenced
+  lobby and requires the status author to be the lobby's author (= its `host`).
+- **Status shape**: `Starting`/`Racing`/`Finished` need a `race_id`; `Open` must not have
+  one.
+- **Plausibility** (from the lobby's track and laps): `best_lap_ms >= MIN_LAP_MS[track]`,
+  `finish_ms >= laps × MIN_LAP_MS[track]`, best lap ≤ finish, lap ≤ 10 min, race ≤ 1 h.
+  `MIN_LAP_MS[palm-cove] = 20 000`: the centreline is ~2116 m, the fastest possible kart
+  ~72 m/s (top base 40.7 + boost 16 + star 7); even a 75 %-length corner-cutting line
+  takes ~22 s. A normal lap is ~55 s.
+- **Presence** (existing `PeerEndpointEntry`): an `EndpointKind::Iroh` advertisement must
+  state `expires_at`, at most 15 min after `published_at`. Other kinds keep their rules.
+- **Index links**: each link's target must be the linker's own action of the right entry
+  type, and its base must be the one that entry determines: the lobby it names, the hour
+  bucket of the lobby's action timestamp, or the leaderboard band of the result's best
+  lap on its lobby's track (with the lap as the tag). So no one can put someone else's
+  record into an index, or a record into the wrong lobby, bucket or band.
+
+**Race results are self-reported. Plausibility checks reject impossible values but do not
+prevent cheating.** A player can publish any plausible time, in any place.
+
+### Membership and status (reader rules)
+
+Membership is resolved when reading, from append-only joins and leaves
+(`protocol::lobby::resolve_members`): a player's latest record decides (a leave wins a
+same-millisecond tie), their latest join sets the character, the host sorts first and the
+rest by when their current membership began. The first `max_players` are admitted; the
+rest are a wait list, promoted when someone leaves. Status (`resolve_status`) is the host's
+statuses in time order up to the first terminal one: nothing follows `Finished` or
+`Abandoned`. The honest coordinator refuses to join a lobby that is not `Open`.
+
+Membership is control-plane state. The membership snapshot taken at race setup (one
+`get_lobby`) is what the race runs with; WP8 will use the same snapshot to admit only
+members to the race's tracks.
+
+### Indexing
+
+- **Public discovery: hour buckets** (`kart.lobbies.<unix hour>`, validated against the
+  lobby's action timestamp). `list_open_lobbies` reads the current bucket and the 6 before
+  it, newest first, examines at most 100 lobbies and returns at most 50 (and at most the
+  caller's limit). No single hot anchor, no scan of history: lobbies older than ~7 h stop
+  being listed (a lobby is short-lived).
+- **Lobby → join / leave / status** links from the lobby's own action hash. `get_lobby`
+  reads at most 128 of each (joins and leaves oldest first, statuses newest first) and the
+  4 newest endpoint advertisements per admitted member.
+- **Agent → result** from the player's own key.
+- **Leaderboard: best-lap bands** (`kart.leaderboard.<track>.<best_lap_ms / 10 000>`),
+  tag = best lap (u32, big-endian). `get_leaderboard` walks bands upward from the track's
+  lap floor, ranks a band from the tags alone, fetches only entries that make the list,
+  and stops at the limit (hard cap 50); at most 58 bands per track. One entry per
+  `(race_id, player)` (the fastest seen). Ranked by best lap because it is comparable
+  across lap counts; results without a lap (DNF) are not ranked.
+
+### Invite codes
+
+The lobby never stores the code. `create_lobby` draws a 16-byte salt (`random_bytes`) and
+derives an Ed25519 key from `SHA-256` iterated 10 000 times over
+`domain ‖ salt ‖ code`; it stores only `salt` and the **verify key**. Joining derives the
+same key from the code and signs `domain ‖ lobby ‖ player`; the join carries the 64-byte
+signature. Any validator checks it against the lobby's verify key without knowing the
+code, a proof cannot be replayed by another player or into another lobby, and the host
+needs none. This is stronger than storing `hash(salt ‖ code)`: a validator holding only a
+hash could not tell a real proof from a copied hash.
+
+Limits: the verify key and salt are public, so a low-entropy code can be guessed offline
+(the KDF only slows that down). Codes must be high-entropy; the minimum length (6) is not
+a guarantee. The code passes through the local conductor's app websocket in the
+`create_lobby` / `join_lobby` input (loopback only), is redacted from `Debug`, and is not
+logged or stored. Rate limiting of join attempts is deferred to WP9 (there is no
+per-attempt hook before a write in this DNA).
+
+### Presence (endpoint expiry)
+
+The existing endpoint advertisement (`published_at` / `expires_at`, Stage 13) is the
+presence system; WP7 adds no second one. An app publishes its iroh endpoint with a 2 min
+validity and refreshes it every 60 s (`PresenceRefresher`; `create_lobby`/`join_lobby`
+can carry the first one). Readers judge freshness with their own clock
+(`LobbyView::live_iroh_endpoints(agent, now)`): expired, incoherent or non-iroh
+advertisements are never returned, so a lapsed member has *no* endpoint rather than a
+stale one, and the DNA refuses a never-expiring iroh advertisement, so there is nothing to
+fall back to. Each refresh appends 4 actions (endpoint entry + link, `Peer` entry + link);
+reads look only at the newest 4.
+
+The AgentPubKey ↔ iroh EndpointId binding is unchanged and mandatory: the advertisement
+is valid only if authored by the agent it names, and the mesh authenticates the
+EndpointId in every handshake. The DNA cannot enforce "one EndpointId per agent"
+globally: proving that no other agent claims a key would need a DHT-wide read, which
+validation cannot do deterministically. Race setup enforces it instead: `iroh_addr_for`
+refuses an agent with two live EndpointIds, and `MeshSession::start` refuses a roster in
+which two agents share one EndpointId, or one is bound to the local EndpointId.
+
+### DNA version
+
+Integrity changes change the DNA hash, so WP7 is a **new network**: agents on the
+pre-WP7 DNA (`uhC0kof1KIK_PxEK6xRXh1rY0bZeb06U9YwsVSKW4Pq4Chj6h_Hl9`, built from
+eea9421) and on the WP7 DNA (`uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN`)
+do not see each other's data. Nothing is migrated; old records stay on the old network.
+The test-only `forge` DNA (`dna/workdir/forge`) has the same hash: coordinator zomes do
+not affect it, so forged-record tests run against exactly the production rules. The
+packed bundles in `dna/workdir` are rebuilt by the tests and, as before, not committed
+(the committed bundle dates from the initial commit).
+
+### When Holochain is called
+
+| Called | Not called |
+|---|---|
+| lobby discovery, creation, joining, leaving | kart state publish / receive |
+| race setup (`get_lobby` snapshot), status changes | AI state publish / receive |
+| result publication, leaderboard queries | reliable race-event delivery |
+| presence refresh (every 60 s, around the race) | host heartbeats, election, migration |
+
+Holochain is not used for realtime game traffic. The two-conductor test counts every zome
+call through the bridge and asserts **zero** across a window of kart state, events, AI
+frames, heartbeats, a host failure, the election and the migration. A boundary test keeps
+the game crates (mesh, mesh-iroh, kart-wire, clock, host) unable to depend on the
+directory or Holochain at all.
+
+### Known limitations (WP7)
+
+- **Membership is control-plane state** with eventual consistency: two readers may see
+  different members until gossip settles. The race uses the host's setup snapshot.
+- **No race admission yet (WP8).** Members are known, but nothing yet stops a non-member
+  from subscribing to a race's tracks; the snapshot is ready for WP8 to use.
+- **Results are not anti-cheat.** Self-reported; plausibility only. No cross-signing,
+  no check that the reporter was a member of the race, and one entry per
+  `(race_id, player)` is a reader rule, not a write limit.
+- **Presence expiry is best-effort.** It depends on both clocks being roughly right and
+  on gossip delivering refreshes; an EndpointId change leaves the agent unreachable until
+  its older advertisement expires (≤ 2 min), because the mesh refuses to choose between
+  two live identities.
+- **Bounded reads trade completeness for cost**: more than 128 joins/leaves in one lobby,
+  more than 100 lobbies in the window, or lobbies older than ~7 h are not seen. Joins
+  are read oldest first, so a member who spams joins/leaves early can fill the 128-record
+  window and hide later joiners (no rate limit until WP9).
+- **No hardening or rate limits yet (WP9):** join attempts, result spam and status spam
+  are not rate-limited.
+- **No reconnect (WP6).**
+- **Real-conductor tests are in-process sweettest conductors** on one machine over
+  loopback websockets; no real Internet, NAT or multi-machine validation.

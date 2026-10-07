@@ -29,6 +29,9 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP3 | Game delivery contracts (`Latest` over MoQ datagrams, bounded `ReliableOrdered` with replay), `kart-wire` v1 format, loss/latency/bandwidth/CPU measurements | **done, tested locally** (loopback direct, local relay, kernel netem loss in a private network namespace) - `crates/kart-wire`, `crates/mesh-iroh` (`tests/delivery.rs`, `examples/mesh_bench.rs`). **Not tested over the Internet or through NAT** |
 | WP4 | Host-relative clock estimation (NTP 4-timestamp samples over `Latest`, robust estimator) and race-start scheduling | **done, tested locally** (loopback direct, local relay, netem 2/5 %, simulated clock skew) - `crates/clock`. **Not validated on a real network** |
 | WP5 | Host authority: epochs, deterministic election, heartbeat failure detection, host-owned AI tracks, migration with resume, stale-epoch rejection | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/host`. **Not tested on the real Internet or between machines** |
+| WP7 | Lobby control plane in the DNA: lobbies, membership, characters, host-only status, self-reported results, leaderboards, expiring iroh presence | **done, tested on real conductors** (in-process sweettest, two and three conductors, loopback websockets) - `dna/`, `crates/protocol/src/lobby.rs`, `crates/hdk-bridge/src/lobby.rs`. **Not tested between machines or over the Internet** |
+| WP6 / WP8 / WP9 / WP10 | Reconnect / track admission / hardening and rate limits / Tauri bridge | **not started** |
+| Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
 blocked: rather than wait on a wasm toolchain to become available before
@@ -841,7 +844,9 @@ say nothing about Internet latency, and the relay is local.
   publisher (no bound, no late-joiner replay policy); `Latest` uses a
   stream per object, and datagrams are not used. Both are WP3.
 - **The DNA does not enforce "one EndpointId per agent".** Only
-  `InMemoryPeerDirectory` does; adding the integrity rule is WP7.
+  `InMemoryPeerDirectory` does. WP7 found it cannot be an integrity rule (global
+  uniqueness is not checkable deterministically); race setup enforces it instead (see
+  ARCHITECTURE.md "Lobby control plane (WP7)", Presence).
 - **Both paths on loopback.** The tests use `IrohConfig::insecure_relay_tls`
   (feature `test-utils`) to trust the self-signed local relay. Production
   builds cannot enable it.
@@ -1014,3 +1019,77 @@ heartbeats, 1 s failure timeout) unless noted:
 Before relying on WP5, read the full limitations in ARCHITECTURE.md "Known limitations
 (WP5)": partitions, relay stalls versus `failure_timeout`, no rejoin, hostile claims, and
 AI continuity being the game's job.
+
+## WP7: lobby control plane (Holochain)
+
+```text
+create_lobby -> Lobby (+ hour-bucket link, host's join, Open status, presence)
+list_open_lobbies -> join_lobby (character, invite proof) -> get_lobby (race-setup snapshot)
+set_lobby_status (host only) -> race (0 Holochain calls) -> publish_result -> get_leaderboard
+presence: iroh endpoint advertisement, valid 2 min, refreshed every 60 s, must expire
+```
+
+```bash
+cargo test -p holochain-moq-protocol lobby                                     # rules, membership, invite proofs (no conductor)
+cargo test -p holochain-moq-hdk-bridge                                         # bridge pre-checks (no conductor)
+cargo test -p holochain-moq-e2e --test lobby_validation -- --test-threads=1    # integrity accept/reject, forged records
+cargo test -p holochain-moq-e2e --test lobby -- --test-threads=1 --nocapture   # two-conductor flow, lifecycle, presence, numbers
+```
+
+The tests build the zomes and pack both `dna/workdir` (production) and `dna/workdir/forge`
+(test only: production integrity + a coordinator that commits records unchecked, so
+forged records reach validation). The rebuilt bundles are not committed.
+
+Tested on real in-process sweettest conductors (real validation, gossip and websockets)
+on one machine. **Not tested between machines or over the Internet.**
+
+| Test | Result |
+|---|---|
+| Two conductors via `HolochainPeerDirectory`: Alice creates, Bob discovers, joins, Alice observes | Bob is a member with his character; both have live iroh advertisements of exactly their transport's EndpointId; Bob's join is on Bob's own chain |
+| Race from the snapshot | roster built from DHT endpoints → real iroh mesh + host session; kart state, events, AI frames, heartbeats, host failure, election and migration with **0** zome calls (counted at the bridge) |
+| Integrity, forged records (forge DNA) | rejected: 13 lobby (forged host, bounds, class, track, name, relays, invite key), 11 result (forged player, impossible times, place, race id, character), 9 join/leave (forged player, character, bad/non-lobby/unparseable references, proof on a public lobby), 3 status (non-host, shape), 3 presence (no expiry, too long, forged agent), 7 index links |
+| Invite lobby | missing, garbage, replayed (another player's) and wrong-code proofs rejected by validation; the right code joins; the code is not in the stored lobby |
+| Lifecycle (3 conductors) | capacity 2 → wait list; leave promotes; re-join waits with the new character; non-host status rejected; not listed or joinable once `Starting`; nothing follows `Finished` |
+| Results / leaderboard | foreign and impossible results rejected; ranked by best lap; one per (race, player); limit and hard cap respected; unknown track rejected |
+| Presence | expired advertisements never returned; refresh keeps the agent reachable past the first expiry; a never-expiring iroh advertisement is rejected; an agent advertising another's EndpointId is refused at race setup |
+
+Measured (in-process conductors, loopback websockets; control-plane latencies, not game metrics):
+
+| Operation | Time |
+|---|---|
+| `create_lobby` with presence (10 actions: lobby, bucket link, host join + link, status + link, presence 4) | 168 ms |
+| Bob discovers the lobby (`list_open_lobbies` polled, cross-conductor propagation) | 3.0 s |
+| `join_lobby` | 109 ms |
+| Alice observes Bob's join (polled) | 1.1 s |
+| `get_lobby` (2 members) | 27 ms |
+| `publish_result` | 70 ms |
+| Result visible on Alice's leaderboard (polled) | 1.3 s |
+| `get_leaderboard` | 130 ms |
+| Presence refresh (4 actions) | p50 96 ms, max 117 ms (10 refreshes) |
+
+Versions: re-checked 2026-10-07. crates.io's newest are prereleases (holochain
+0.8.0-dev.10, hdk 0.9.0-dev.4, hdi 0.9.0-dev.9, holochain_client 0.10.0-dev.10); the
+latest stable set is what is pinned and installed: holochain / hc 0.7.0, hdk 0.7.0,
+hdi 0.8.0, holochain_client 0.9.0, holo_hash 0.7.0. No upgrade. New dependencies:
+`sha2` 0.10 in `crates/protocol` (already in the tree via ed25519-dalek) and an explicit
+`holo_hash` 0.7.0 (`encoding`) in the integrity zome (already resolved by hdi).
+
+The integrity zome changed, so the DNA hash changed: WP7 is a new network
+(ARCHITECTURE.md "Lobby control plane (WP7)", DNA version).
+
+### Known limitations (WP7)
+
+- **Membership is control-plane state**, eventually consistent. The race uses the
+  setup snapshot; WP8 will use it to admit only members to race tracks (not started).
+- **Results are self-reported. Plausibility checks reject impossible values but do not
+  prevent cheating.**
+- **Presence expiry is best-effort** (clocks, gossip). An EndpointId change leaves the
+  agent unreachable until the older advertisement expires (≤ 2 min).
+- **Bounded reads**: 128 joins/leaves per lobby, 100 lobbies over the last ~7 h, 4
+  advertisements per member, 50 results per listing.
+- **No reconnect (WP6), no track admission (WP8), no hardening or rate limits (WP9):**
+  join attempts and result/status spam are not rate-limited.
+- **No real Internet / NAT / multi-machine validation.**
+- **`holo_hash` 0.7.0 panics** when parsing empty or non-ASCII hash text. WP7 screens
+  lobby references before parsing; the pre-existing `parse_agent` in the bridge does not
+  (a malformed agent string from a caller panics instead of erroring).

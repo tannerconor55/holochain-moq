@@ -1052,3 +1052,68 @@ Decoding rejects:
 - **kart-wire `HostChanged` (event type 2)** keeps its byte layout unchanged. It carries
   no epoch, so it is **not** the authority mechanism; the host-authority `HostChanged`
   above is. Event type 2 remains available for a game-level notification.
+
+## WP7: lobby control plane (`moq_directory` DNA, `protocol::lobby`)
+
+Durable control-plane records only; none of this is read or written during a race. The
+race runs from one `get_lobby` snapshot taken at setup. Types: `crates/protocol/src/lobby.rs`
+(shared by the zomes and native code); design: ARCHITECTURE.md "Lobby control plane (WP7)".
+
+### Identifiers
+
+| Name | Form |
+|---|---|
+| `LobbyId` / `ActionHashB64` | base64 `ActionHash` of the lobby's create action: `uhCkk` + 48 more URL-safe base64 characters (53 total), canonical form only |
+| agent | `AgentPubKeyB64` (unchanged) |
+| `race_id` | 1–32 of `[A-Za-z0-9_-]` (same rule as the mesh `RaceId`, so `race/<race_id>/...` tracks can use it) |
+| `character_id` | `blaze` `zippy` `bella` `toadly` `rex` `grumbo` `koopz` `dotty` |
+| `class` | `50cc` `100cc` `150cc` |
+| `track_id` | `palm-cove` (`MIN_LAP_MS` 20 000) |
+
+### Paths and link tags
+
+| Link type | Base | Target | Tag |
+|---|---|---|---|
+| `LobbyBucket` | path `kart.lobbies.<floor(lobby action ms / 3 600 000)>` | lobby create action | empty |
+| `LobbyToJoin` / `LobbyToLeave` / `LobbyToStatus` | lobby create action | that record | empty |
+| `AgentToResult` | the player's agent key | result | empty |
+| `LeaderboardBand` | path `kart.leaderboard.<track_id>.<floor(best_lap_ms / 10 000)>` | result | `best_lap_ms`, u32 big-endian |
+
+### Invite access
+
+```text
+seed_0   = SHA-256("holochain-moq/kart/invite-kdf/v1" ‖ salt[16] ‖ len(code) u32 BE ‖ code)
+seed_i   = SHA-256(seed_{i-1} ‖ salt)            for i = 1 .. 9 999
+key      = Ed25519 signing key from seed_9999;   stored: LobbyAccess::InviteCode { salt, verify_key }
+digest   = SHA-256("holochain-moq/kart/invite-proof/v1" ‖ len(lobby) u32 BE ‖ lobby ‖ len(player) u32 BE ‖ player)
+proof    = Ed25519 signature of digest by key (64 bytes) in LobbyJoin.invite_proof
+```
+
+`code`: 6–64 printable ASCII characters. A public lobby takes no proof; the host's own
+join needs none.
+
+### Coordinator functions (added)
+
+| Function | Input → output | Notes |
+|---|---|---|
+| `create_lobby` | `CreateLobbyInput` → `ActionHash` | caller is host; also writes the bucket link, the host's join, an `Open` status, and the optional presence |
+| `list_open_lobbies` | `u32` limit → `Vec<LobbySummary>` | current + 6 previous hour buckets; ≤ 100 examined, ≤ 50 returned |
+| `join_lobby` | `JoinLobbyInput` → `ActionHash` | refuses unless `Open`; derives the invite proof from the code |
+| `leave_lobby` | `LobbyId` → `ActionHash` | append-only |
+| `get_lobby` | `LobbyId` → `Option<LobbyView>` | lobby, current status, admitted members with their 4 newest advertisements, wait list |
+| `set_lobby_status` | `LobbyStatus` → `ActionHash` | valid only from the host |
+| `publish_result` | `RaceResult` → `ActionHash` | valid only from `player`; plausibility-checked |
+| `get_leaderboard` | `LeaderboardInput { track_id, limit }` → `Vec<LeaderboardEntry>` | fastest best laps, ≤ 50 |
+
+### Presence
+
+An `EndpointKind::Iroh` endpoint advertisement must state `expires_at`, at most
+`published_at + 900 000` ms. Apps use 120 000 ms validity and refresh every 60 000 ms.
+Readers drop expired advertisements with their own clock, and never fall back to an
+expired or non-iroh one. Existing endpoint kinds and the legacy `publish_endpoint` path
+are unchanged for non-iroh endpoints.
+
+### DNA hash
+
+WP7 DNA: `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` (pre-WP7:
+`uhC0kof1KIK_PxEK6xRXh1rY0bZeb06U9YwsVSKW4Pq4Chj6h_Hl9`). A new network; no migration.
