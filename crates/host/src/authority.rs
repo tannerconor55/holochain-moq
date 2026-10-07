@@ -83,6 +83,9 @@ pub enum Reject {
     NotSelfClaim,
     /// The claimed host is not a member of this race.
     NotMember,
+    /// The claimed host already failed (or was deposed) as host in this race,
+    /// e.g. a hung old host coming back. Only `elect` can re-admit, never a claim.
+    FailedHost,
 }
 
 /// The result of adopting a new authority.
@@ -227,6 +230,29 @@ impl AuthorityState {
         self.adopt(proposal)
     }
 
+    /// Should this peer answer `claim` (for the next epoch, from a higher
+    /// agent) with its own claim for the same epoch? Yes iff, by this peer's
+    /// view, *it* is the deterministic successor of the current host. The
+    /// same-epoch tie-break then makes everyone converge on it, so the winner
+    /// is the lowest eligible member even when views or detection times
+    /// differ. A current (possibly hung) host never counter-claims.
+    pub fn counter_claim(
+        &self,
+        claim: &Authority,
+        alive: &BTreeSet<AgentPubKeyB64>,
+    ) -> Option<Authority> {
+        let ok = claim.epoch == self.current.epoch.next()
+            && claim.host != self.local
+            && self.current.host != self.local
+            && !self.failed.contains(&self.local)
+            && self.local < claim.host
+            && self.successor(&self.current.host, alive).as_deref() == Some(self.local.as_str());
+        ok.then(|| Authority {
+            host: self.local.clone(),
+            epoch: claim.epoch,
+        })
+    }
+
     /// A `HostChanged` from `sender`: adopt it or say why not.
     pub fn on_host_changed(
         &mut self,
@@ -240,6 +266,12 @@ impl AuthorityState {
             return Err(Reject::NotMember);
         }
         use std::cmp::Ordering::*;
+        if claim.epoch < self.current.epoch {
+            return Err(Reject::Stale);
+        }
+        if self.failed.contains(&claim.host) {
+            return Err(Reject::FailedHost);
+        }
         match claim.epoch.cmp(&self.current.epoch) {
             Less => Err(Reject::Stale),
             Equal if claim.host == self.current.host => Err(Reject::Duplicate),
@@ -409,6 +441,81 @@ mod tests {
         );
         assert!(st.on_host_changed(c.clone(), &a[1]).is_ok());
         assert_eq!(st.on_host_changed(c, &a[1]), Err(Reject::Duplicate));
+    }
+
+    /// A deposed host (lowest agent!) coming back with a same-epoch or newer
+    /// claim must not win the tie-break.
+    #[test]
+    fn a_deposed_host_cannot_claim_its_way_back() {
+        let a = agents(4);
+        let mut st = AuthorityState::new(a[3].clone(), a.clone(), a[0].clone()).unwrap();
+        st.on_host_changed(
+            Authority {
+                host: a[1].clone(),
+                epoch: HostEpoch(2),
+            },
+            &a[1],
+        )
+        .unwrap();
+        for e in [2, 3] {
+            let back = Authority {
+                host: a[0].clone(),
+                epoch: HostEpoch(e),
+            };
+            assert_eq!(
+                st.on_host_changed(back, &a[0]),
+                Err(Reject::FailedHost),
+                "epoch {e}"
+            );
+        }
+        assert_eq!(st.current().host, a[1]);
+    }
+
+    #[test]
+    fn the_rightful_successor_counter_claims_a_premature_higher_claim() {
+        let a = agents(4);
+        let all = alive(&a[1..]);
+        let claim = Authority {
+            host: a[2].clone(),
+            epoch: HostEpoch(2),
+        };
+        let st1 = AuthorityState::new(a[1].clone(), a.clone(), a[0].clone()).unwrap();
+        assert_eq!(
+            st1.counter_claim(&claim, &all),
+            Some(Authority {
+                host: a[1].clone(),
+                epoch: HostEpoch(2)
+            })
+        );
+        let st3 = AuthorityState::new(a[3].clone(), a.clone(), a[0].clone()).unwrap();
+        assert_eq!(
+            st3.counter_claim(&claim, &all),
+            None,
+            "a[3] is not the successor"
+        );
+        let host = AuthorityState::new(a[0].clone(), a.clone(), a[0].clone()).unwrap();
+        assert_eq!(
+            host.counter_claim(
+                &Authority {
+                    host: a[1].clone(),
+                    epoch: HostEpoch(2)
+                },
+                &all
+            ),
+            None,
+            "the (hung) host steps down"
+        );
+        assert_eq!(
+            st1.counter_claim(
+                &Authority {
+                    host: a[2].clone(),
+                    epoch: HostEpoch(3)
+                },
+                &all
+            ),
+            None,
+            "only for the next epoch"
+        );
     }
 
     /// Split brain: two peers with different views both claim epoch 2. Every

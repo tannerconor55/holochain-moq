@@ -13,9 +13,14 @@
 //! owning their own karts: nothing here claims authority over player tracks.
 
 pub mod authority;
+pub mod session;
 pub mod wire;
 
 pub use authority::{
     Authority, AuthorityState, HostEpoch, HostRole, Reject, SetupError, Transition, Verdict,
+};
+pub use session::{
+    AiSnapshot, HostConfig, HostError, HostEvent, HostSession, HostSetup, HostStats, AI_TRACK,
+    CONTROL_TRACK, HEARTBEAT_TRACK,
 };
 pub use wire::{AiFrame, Heartbeat, HostChanged, HostMessage, WireError, MAX_AI_PAYLOAD};
