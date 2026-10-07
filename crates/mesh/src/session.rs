@@ -319,6 +319,7 @@ impl<T: MeshTransport> MeshSession<T> {
                         rtt_ms: info.rtt_ms,
                         role: Some(p.role),
                         since: Some(p.since),
+                        counters: info.counters,
                     }
                 }
                 None => PeerStatus {
@@ -328,6 +329,7 @@ impl<T: MeshTransport> MeshSession<T> {
                     rtt_ms: None,
                     role: None,
                     since: None,
+                    counters: None,
                 },
             })
             .collect()

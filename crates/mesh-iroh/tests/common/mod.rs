@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod lossy;
+
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -156,4 +158,16 @@ pub fn percentiles(v: &mut [u64]) -> (u64, u64, u64) {
     v.sort_unstable();
     let at = |q: f64| v[((v.len() as f64 - 1.0) * q).round() as usize];
     (at(0.5), at(0.95), at(0.99))
+}
+
+/// Current resident set size in KiB (Linux `/proc/self/status` VmRSS).
+pub fn rss_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .map(|l| l.split_whitespace().nth(1).unwrap().parse().unwrap())
+        })
+        .unwrap_or(0)
 }

@@ -3045,6 +3045,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "holochain-moq-kart-wire",
  "holochain-moq-mesh",
  "holochain-moq-mesh-iroh",
  "holochain-moq-node",

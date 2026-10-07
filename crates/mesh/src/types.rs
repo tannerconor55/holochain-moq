@@ -311,6 +311,8 @@ pub struct PeerStatus {
     pub role: Option<Role>,
     /// When the current session was established.
     pub since: Option<Instant>,
+    /// Transport counters for the current session, if exposed.
+    pub counters: Option<LinkCounters>,
 }
 
 /// Why an incoming or outgoing connection was refused before any track

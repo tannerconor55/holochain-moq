@@ -459,7 +459,10 @@ fn golden_fixture_file_matches() {
     }
     let on_disk = std::fs::read_to_string(path)
         .expect("fixtures/golden.json (run once with KART_WIRE_BLESS=1)");
-    assert_eq!(on_disk, text, "golden fixture out of date");
+    // Compared as JSON values: key order depends on serde_json features that
+    // workspace feature unification may switch on (`preserve_order`).
+    let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    assert_eq!(on_disk, fixture, "golden fixture out of date");
     // And the reject vectors really are rejected.
     for r in fixture["rejects"].as_array().unwrap() {
         let b = unhex(r["hex"].as_str().unwrap());
