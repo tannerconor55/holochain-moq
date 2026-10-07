@@ -1117,3 +1117,45 @@ are unchanged for non-iroh endpoints.
 
 WP7 DNA: `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` (pre-WP7:
 `uhC0kof1KIK_PxEK6xRXh1rY0bZeb06U9YwsVSKW4Pq4Chj6h_Hl9`). A new network; no migration.
+
+## Gaming platform: game identity and namespaces (`crates/platform`)
+
+Design: ARCHITECTURE.md "Gaming hApp / Multi-Game Architecture". The types below are
+implemented and validated in `crates/platform/src/lib.rs`; **no DNA stores them yet**
+(planned: registry entries in the shared `gaming_directory` DNA). No new wire format is
+defined here.
+
+### Identifiers
+
+| Name | Form | Meaning |
+|---|---|---|
+| `game_id` | `[a-z][a-z0-9-]`, 3–32 bytes, no `--`, no trailing `-` | stable forever; e.g. `turbo-kart`, `cubyz`, `saber` |
+| `Version` | `major.minor.patch`, each `u16` | ordered; the Hub never installs a lower one |
+| `protocol_version` | `u32` | realtime/control protocol generation; peers share a session only on equal values |
+| `dna_hash` | base64 `DnaHash`, `uhC0k` + 48 (53 characters) | the game DNA a release runs against; the Hub refuses a packed DNA that does not hash to it |
+| `Platform` | `LinuxX86_64` `LinuxAarch64` `WindowsX86_64` `MacosX86_64` `MacosAarch64` | |
+| artifact `path` | relative, `/`-separated, components `[A-Za-z0-9._-]`, not `.`/`..`/hidden, ≤ 128 bytes, ≤ 8 components | where the Hub places the file in the game's directory |
+| artifact `sha256`, `size` | 32 bytes, 1 B – 8 GiB | pins the content |
+
+### Records (planned registry entries)
+
+- `Game { game_id, name, developer }`, authored by `developer`.
+- `GameRelease { game_id, version, protocol_version, dna_hash, artifacts }`, valid only
+  if authored by the game's `developer` (the action signature is the release signature).
+- Update rule (`check_update`): same game; strictly newer, or byte-identical to the
+  installed release; never lower; never a different release under the installed version.
+
+### Namespaces: shared vs game-specific
+
+| Layer | Shared (platform) | Game-specific |
+|---|---|---|
+| Holochain DNA | `gaming_directory` (today `moq_directory`): `Peer`, endpoint advertisements, streams, sessions; planned `Game`, `GameRelease` | one DNA per game: its own entries, links and paths (Turbo Kart: today still inside `moq_directory` under the `kart.*` path anchors; moving to `turbo_kart`) |
+| DHT network | the directory's network | one network per game DNA hash |
+| MoQ tracks | none: there is no cross-game track | `race/<session>/<agent or ai-N>/<track>` inside one game session's mesh |
+| Identity | one `AgentPubKey` across all apps | — |
+| Transport identity | — | one iroh EndpointId per game session endpoint |
+
+A session id (`RaceId` today) only has to be unique among the sessions a player's
+endpoint joins; sessions of different games never share an endpoint or a roster.
+Adapters should still prefix session ids with a game tag (`tk-…`) to keep logs and
+diagnostics unambiguous. This is a convention, not enforced.

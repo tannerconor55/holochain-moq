@@ -1093,3 +1093,27 @@ The integrity zome changed, so the DNA hash changed: WP7 is a new network
 - **`holo_hash` 0.7.0 panics** when parsing empty or non-ASCII hash text. WP7 screens
   lobby references before parsing; the pre-existing `parse_agent` in the bridge does not
   (a malformed agent string from a caller panics instead of erroring).
+
+## Roadmap: Gaming Hub
+
+```text
+Gaming Hub (Tauri, future)                    one install; games added and removed independently
+ ├── gaming_directory DNA (shared)            identity · presence · game registry
+ ├── Turbo Kart  ── turbo_kart DNA + game     lobbies, races, results  (+ kart-net adapter)
+ ├── Cubyz       ── cubyz DNA + game          worlds, permissions
+ ├── Saber       ── saber DNA + game          matches, teams
+ └── future games
+        all realtime traffic: game-net (mesh, clock, host authority) over MoQ + iroh
+```
+
+| Piece | State |
+|---|---|
+| Realtime game-net layers (`mesh`, `mesh-iroh`, `clock`, `host`), game-neutral | **implemented** (WP2–WP5); boundary-tested to know no specific game |
+| Turbo Kart control plane (lobbies, races, results) | **implemented** (WP7), but still inside the shared `moq_directory` DNA |
+| Game identity / release types and validation (`holochain-moq-platform` (`crates/platform`)) | **implemented, types only**; not stored in any DNA |
+| Split into `gaming_directory` + `turbo_kart` DNAs | **planned** (next step; changes both DNA hashes once) |
+| Game registry entries, Gaming Hub (install / update / launch), signed releases | **planned** |
+| Cubyz, Saber, Descent | **not started** |
+
+See ARCHITECTURE.md "Gaming hApp / Multi-Game Architecture" for the composition decision
+(one hApp per game under one agent key), the release trust model and game isolation.

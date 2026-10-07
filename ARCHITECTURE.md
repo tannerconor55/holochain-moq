@@ -1190,3 +1190,246 @@ directory or Holochain at all.
 - **No reconnect (WP6).**
 - **Real-conductor tests are in-process sweettest conductors** on one machine over
   loopback websockets; no real Internet, NAT or multi-machine validation.
+
+## Gaming hApp / Multi-Game Architecture
+
+The kart work (WP1–WP7) is the first game on what is meant to become a **Gaming Hub**: one
+installed platform providing identity, discovery and realtime networking, onto which
+games (Turbo Kart Rally, Cubyz, Saber, Descent, …) are installed, updated and removed
+independently. This section records the audit of what exists, the target architecture,
+and the migration between them. **Only the parts marked implemented exist**; the rest is
+the agreed direction.
+
+```text
+                                 Gaming Hub (Tauri app, future)
+                                  │ list / install / launch games
+          ┌───────────────────────┼─────────────────────────────────────────┐
+          │ Holochain conductor   │                                         │
+          │                       ▼                                         │
+          │   hub hApp ── gaming_directory DNA (shared platform)            │
+          │                 identity · endpoints/presence (iroh binding)    │
+          │                 game registry · streams/sessions (media)        │
+          │                                                                 │
+          │   turbo-kart hApp ── turbo_kart DNA   (lobbies, races, results) │
+          │   cubyz hApp      ── cubyz DNA        (worlds, permissions)     │  one hApp per game,
+          │   saber hApp      ── saber DNA        (matches, teams)          │  installed lazily,
+          │   …                                                             │  same agent key
+          └─────────────────────────────────────────────────────────────────┘
+                  │ setup-time snapshots only (membership, endpoints)
+                  ▼
+   game executable (own download, own process)  ──▶ game adapter (kart-net, cubyz-net, …)
+                                                        │
+                                                        ▼
+                         game-net: mesh · Latest · ReliableOrdered · clock · host authority
+                                   · (reconnect WP6) · (admission hooks WP8) · identity binding
+                                                        │
+                                                        ▼
+                                    MoQ (moq-net, draft-16) over iroh/QUIC
+                                    realtime state · events · AI · clock · host migration
+                                    (future voice/media/game streams)
+```
+
+### Audit: what exists today, and where it belongs
+
+`moq_directory` is the one DNA in the repository. Before WP7 it held only
+platform-level records; WP7 added Turbo Kart's lobby records to it.
+
+| Concept (today) | Where it lives today | Classification | Target home |
+|---|---|---|---|
+| Agent identity (`AgentPubKey`, `Peer`, `last_seen`) | `moq_directory` DNA, `protocol::peer` | shared platform | `gaming_directory` DNA |
+| `PeerEndpoint`, `EndpointAdvertisement`, presence expiry, `IrohHints` | `moq_directory` DNA, `protocol::{endpoint,advertisement}`, `lobby::check_presence` | shared platform | `gaming_directory` DNA (one presence per player, not per game) |
+| AgentPubKey ↔ iroh EndpointId binding | entry authorship (DNA) + `mesh-iroh::record` + mesh roster checks | shared platform (rule) + generic networking (enforcement) | unchanged |
+| Relay URLs | iroh hints (platform); `Lobby::relay_urls` (kart) | platform hints; per-lobby choice is game-level | unchanged |
+| `StreamAdvertisement`, `SessionRecord`, admission proofs | `moq_directory` DNA | shared platform (media: screen share, future voice) | `gaming_directory` DNA |
+| `Lobby`, `LobbyJoin`, `LobbyLeave`, `LobbyStatus`, `LobbyState`, `RaceResult`, best-lap leaderboard | `moq_directory` DNA, `protocol::lobby` | **Turbo Kart-specific** (laps, classes, tracks, lap floors, racer roster, race results) | new `turbo_kart` DNA |
+| Invite-code proof, append-only membership resolution, terminal-sticky status resolution | `protocol::lobby` | game-neutral *mechanisms* inside a kart module | reusable helper module for any game DNA (extract at the split) |
+| Game identity, release metadata (`Game`, `GameRelease`) | `holochain-moq-platform` (`crates/platform`) (**implemented now, types only**) | shared platform | registry entries in `gaming_directory` (planned) |
+| `mesh`, `mesh-iroh`, `clock`, `host` | crates | **generic realtime** (verified: no kart types, no Holochain) | `game-net` |
+| `kart-wire` (`KartState`, kart events) | crate | Turbo Kart-specific realtime | `kart-net` adapter |
+
+Single-game assumptions found:
+
+- **The DNA**: kart records sit in the shared directory DNA; every kart rule change
+  changes the hash of the platform directory, and a second game added the same way would
+  couple both games' networks. This is the one structural problem.
+- **`get_lobby` reads directory data** (members' endpoint advertisements) and
+  `create_lobby`/`join_lobby` can write presence: convenient while both live in one DNA,
+  a cross-DNA dependency after the split.
+- **`protocol::lobby` has a generic name** but Turbo Kart contents.
+- **Realtime naming**: `RaceId`, the `race/<race>/…` track prefix and `ai-<slot>` sources
+  are kart vocabulary on game-neutral code. They are session id, session prefix and
+  host-owned (NPC) streams for any game. The names are on the wire (PROTOCOL.md WP3), so
+  they are kept; a future `game-net` facade can alias them (`SessionId = RaceId`) without
+  a wire change.
+- Nothing in mesh, mesh-iroh, clock or host assumes one game (boundary test
+  `the_generic_realtime_layers_know_no_specific_game`; `crates/host/tests/second_game.rs`
+  runs a non-kart session on them in a crate where no kart crate is available).
+
+### Holochain composition: one hApp per game, not one hApp with optional roles
+
+Checked against Holochain 0.7.0 (the pinned version):
+
+- An installed app's roles are fixed at install. `CellProvisioning::Create { deferred }`
+  is parsed from the manifest, but nothing in the 0.7.0 conductor reads `deferred`
+  (checked in the crate source), so there is no later-creation path;
+  `UseExisting` (sharing another app's cell) is **deprecated** with the note "for calling
+  cells of other apps, use bridge calls". So a single Gaming hApp cannot gain a game DNA
+  later without reinstalling the whole bundle.
+- `InstallAppPayload.agent_key` lets the Hub install any number of apps **under the same
+  agent key**. The same `AgentPubKey` then authors records in every game's DNA and in the
+  directory, so the identity binding (authorship) carries across them unchanged.
+
+Decision: **a hub hApp with the `gaming_directory` DNA, plus one hApp per game**, each
+installed, updated and uninstalled on its own, all under the player's one agent key.
+
+| | One Gaming hApp, all game roles | Hub hApp + one hApp per game (chosen) |
+|---|---|---|
+| Install a game later | reinstall the bundle | install one hApp |
+| Update one game | new bundle for everyone | that game's hApp only |
+| Uninstall a game | not possible per game | uninstall its hApp; its DHT data stays on its network |
+| Shared identity | one app, one key | same key passed at each install |
+| Cross-DNA reads | bridge call by role | composed by the Hub / game adapter over each app's websocket (preferred), or bridge calls by `CellId` |
+| Coupling | all games' DNA versions released together | none |
+
+Composition happens **natively**, not in zomes: the game adapter reads the lobby
+snapshot from the game DNA and each member's endpoint advertisement from
+`gaming_directory`, then builds the mesh roster. No game DNA's validation depends on
+another DNA (validation cannot read across DNAs anyway), and no zome calls another app.
+
+### `moq_directory` → `gaming_directory`, and a separate `turbo_kart` DNA
+
+Recommendation: **the existing directory DNA becomes the shared Gaming Directory**, and
+the WP7 lobby records **move out** into a new `turbo_kart` DNA. Pre-WP7, `moq_directory`
+already *was* the platform directory (identity, endpoints, presence, streams,
+sessions); only WP7's additions are game-specific.
+
+This is an explicit **migration decision, not done in this task**:
+
+- It changes **two** network identities at once: `gaming_directory` (directory minus the
+  lobby entries, plus registry entries) and the new `turbo_kart` DNA. Current WP7 hash:
+  `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN`.
+- Nothing is deployed and the repository has not been pushed, so no user data has to be
+  migrated; the cost is tests and bridge code. Each later change to an integrity zome
+  costs a new network, so the split, the registry entries and the renames should land
+  **together, once**.
+- Verified: a DNA's *manifest name* does not affect its hash (`moq_directory` repacked as
+  `gaming_directory` hashes identically). Renaming the integrity *zome* or changing its
+  code does.
+- Verified the hard way: adding the registry types as an **unused** module of
+  `crates/protocol` changed the DNA hash (to `uhC0kjMGY…`), because the integrity zome
+  compiles that crate. They were moved to a separate crate (`crates/platform`), and the
+  hash returned to exactly the WP7 value. Rule: nothing goes into `crates/protocol` (or
+  any crate a zome compiles) unless a network change is intended.
+
+Migration steps (one change, before WP8 consumes the lobby snapshot):
+
+1. New `dna/turbo_kart` (integrity + coordinator): the lobby entries, validation and
+   functions moved as they are, minus the directory coupling (`get_lobby` returns members
+   without endpoints; presence is published to the directory separately).
+2. `protocol::lobby` → a Turbo Kart types crate; its game-neutral mechanisms (invite
+   proofs, membership and status resolution) → a shared helper module.
+3. `moq_directory` loses the lobby entries and gains the registry entries
+   (`Game`, `GameRelease` from `holochain-moq-platform` (`crates/platform`)), packed as `gaming_directory`.
+4. Bridge: one directory handle per app/role; a kart adapter composes lobby + presence.
+5. WP7 tests ported to two DNAs; the zero-call race test kept as is.
+
+### Game registry (types implemented, entries planned)
+
+`holochain-moq-platform` (`crates/platform`) fixes the contract; nothing is stored yet.
+
+- `Game { game_id, name, developer }`: `game_id` is `[a-z][a-z0-9-]`, 3–32, stable
+  forever; it names the game's DNA namespace and install directory. `developer` is the
+  key allowed to publish releases.
+- `GameRelease { game_id, version, protocol_version, dna_hash, artifacts }`; each
+  artifact is `{ platform, path, sha256, size }`. The registry identifies a release; it
+  does not host the executable.
+
+The brief's `Game { current_version, supported_platforms, dna_hash, release_manifest }`
+is split in two: the identity is stable, a release is per version, and "current" is the
+newest valid release (a reader rule).
+
+### Gaming Hub contract (architecture-level; not implemented)
+
+| Operation | Meaning |
+|---|---|
+| `list_games()` | registry games, newest release each, filtered to the local platform |
+| `get_game(game_id)` | the game, its releases, and the developer key the Hub pinned |
+| `install_game(game_id, version)` | fetch the release entry → `check_update` → download each artifact from any source → verify SHA-256 + size → place under the game's directory by its validated relative path → install the game hApp under the player's agent key, refusing it unless its DNA hashes to `dna_hash` |
+| `uninstall_game(game_id)` | remove files and uninstall the game hApp (the game's DHT data stays on its network; the shared identity is untouched) |
+| `launch_game(game_id)` | start the executable with a handle to its own app (and read-only access to the directory), never the Hub's admin interface |
+| `get_installed_games()` | local install records: game, version, DNA hash, paths |
+
+### Release trust model
+
+**A download source provides bytes; cryptographic verification determines whether those
+bytes are the expected release.**
+
+| Threat | Boundary |
+|---|---|
+| Tampered or substituted executable | artifact SHA-256 + size from a release entry signed (authored) by the developer key |
+| Wrong or tampered game DNA | the packed DNA must hash to the release's `dna_hash` before install |
+| Malicious registry entry for an existing game | releases count only if authored by the game's `developer`; first registration of a `game_id` owns it (reader rule, as for stream ids) and the Hub pins the developer key on first install (trust on first use), so a later squatter cannot take over an installed game |
+| Squatting a new popular `game_id` | not prevented by the DNA; mitigated by a curated allowlist / verified-publisher list in the Hub (open question) |
+| Downgrade or same-version substitution | `check_update` refuses lower versions and a different release under the installed version |
+| Path traversal in a package | `safe_package_path`: relative, `/`-separated, `[A-Za-z0-9._-]` components, no `.`/`..`/hidden components, bounded |
+| Untrusted download source / mirror / P2P | irrelevant to trust: bytes are verified before use |
+| Incompatible peers | equal `protocol_version` required to share a session |
+| Compromised developer key | **not handled**: needs key rotation/revocation (open question; DeepKey/DPKI is not in the 0.7 SDK) |
+
+Not implemented here: downloading, hashing files, installing apps, signature tooling,
+key rotation.
+
+### game-net and game adapters
+
+Already generic, and kept that way by tests: `mesh` (sessions, roster, identity binding,
+`Latest`, `ReliableOrdered`), `mesh-iroh` (transport), `clock` (host-relative time,
+scheduled start), `host` (authority, epochs, election, migration, host-owned streams).
+Planned additions in the same layer: reconnect (WP6), admission hooks (WP8), hardening
+(WP9). Turbo Kart-specific: `kart-wire`, the lobby control plane, and the future
+`kart-net` adapter that joins them.
+
+No extraction was done: the four crates already form `game-net` with no game types in
+them; renaming them or adding a facade crate now would move code without changing a
+boundary. The planned seam is a `game-net` facade that re-exports them with game-neutral
+names (`SessionId` for `RaceId`) and leaves the wire unchanged.
+
+### Isolation between games
+
+Shared identity is not shared authorization, and not shared game state:
+
+| A future game cannot… | because | shown by |
+|---|---|---|
+| write Turbo Kart entries | each game has its own DNA (after the split); a cell can only commit to its own DNA and the kart DNA's validation decides what is valid there | DNA separation (architecture); forged-record tests in `lobby_validation.rs` show validation, not coordinators, is the gate |
+| join or subscribe to a kart race session | a session admits only EndpointIds bound in its roster, built from the kart lobby snapshot; the same player's endpoint for another game is a different EndpointId | `second_game.rs::shared_identity_is_not_shared_authorization_across_game_sessions` (refused as `NotMember`) |
+| modify race state | kart state, events and AI are published only on the publisher's own tracks in the race session; host authority is per session | WP2/WP5 tests |
+| read another game's private lobby | invite proofs are bound to one lobby and one player | `lobby_validation.rs` invite test |
+
+Per-track admission inside a session (members-only subscription) is WP8; today any roster
+member can subscribe to any track of its own session.
+
+### Realtime boundary (unchanged, now platform-wide)
+
+| Holochain | MoQ / iroh |
+|---|---|
+| identity, discovery, game registry | realtime state and events |
+| membership, lobby/control state | AI / NPC state |
+| durable results, leaderboards | clock synchronisation |
+| presence (refreshed around play) | host authority and migration |
+| | future voice, media and game streams |
+
+**Zero Holochain calls during steady-state realtime delivery**, for every game. Enforced
+by the counted two-conductor race test (WP7) and by boundary tests that keep the realtime
+crates unable to depend on Holochain or a game's control plane.
+
+### Risks and open questions
+
+- **Timing of the split.** Every WP built on the mixed DNA adds porting work; do it
+  before WP8.
+- **Presence per player vs per game.** One iroh endpoint per game session (as now) keeps
+  sessions isolated by EndpointId. The directory then holds one advertisement per active
+  game endpoint: a game-scoped tag on advertisements may be needed (a directory change).
+- **Registry governance**: who may register a `game_id`, curated lists, and developer-key
+  rotation are open.
+- **Launch isolation**: the game process gets an app interface token for its own app;
+  OS-level sandboxing of game executables is out of scope.
+- **`race/` and `ai-` wire names** stay until a deliberate wire version bump.
