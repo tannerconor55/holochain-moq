@@ -254,6 +254,8 @@ pub struct SubscriptionStats {
     /// WP6, `ReliableOrdered`: objects recovered from the publisher's history
     /// (fetched groups) rather than the live stream, e.g. after a reconnect.
     pub replayed: u64,
+    /// WP9: objects refused for exceeding the mode's payload limit.
+    pub oversized: u64,
 }
 
 impl SubscriptionStats {
@@ -266,6 +268,7 @@ impl SubscriptionStats {
         self.missing += o.missing;
         self.duplicates += o.duplicates;
         self.replayed += o.replayed;
+        self.oversized += o.oversized;
         self.resubscribes += o.resubscribes;
         self.newest_seq = self.newest_seq.max(o.newest_seq);
     }
@@ -281,6 +284,14 @@ pub struct HistoryUnavailable {
     pub next_seq: u64,
     pub reason: String,
 }
+
+/// WP9: the remote broke this mode's contract (a payload over the limit, a
+/// malformed group, more history than a track may hold). A transport's
+/// [`crate::TrackSource`] fails with this; [`crate::TrackSubscription`]
+/// turns it into the sticky [`crate::MeshError::LimitExceeded`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("peer exceeded a delivery limit: {0}")]
+pub struct LimitViolation(pub String);
 
 /// WP6: how a transport session ended, as far as the transport can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +475,10 @@ pub enum RejectReason {
     WrongDirection,
     /// A session with this agent already exists.
     Duplicate,
+    /// WP9: this roster member opened new links faster than
+    /// [`crate::ADMIT_RATE_PER_S`] (sustained, after a burst of
+    /// [`crate::ADMIT_BURST`]): faster than any honest reconnect.
+    RateLimited,
 }
 
 impl RejectReason {
@@ -474,6 +489,7 @@ impl RejectReason {
             Self::IdentityMismatch => 0x4d02,
             Self::WrongDirection => 0x4d03,
             Self::Duplicate => 0x4d04,
+            Self::RateLimited => 0x4d05,
         }
     }
 }

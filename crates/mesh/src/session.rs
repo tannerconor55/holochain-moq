@@ -60,10 +60,10 @@ use tokio::task::AbortHandle;
 use crate::error::MeshError;
 use crate::transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 use crate::types::{
-    ConnectionKind, DeliveryMode, HistoryUnavailable, MeshEvent, MeshObject, PeerBinding,
-    PeerState, PeerStatus, PublisherStats, RaceId, ReconnectConfig, ReconnectStats, RejectReason,
-    Role, SessionEnd, Source, SubscriptionStats, TrackName, TrackPath, LATEST_MAX_PAYLOAD,
-    RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD,
+    ConnectionKind, DeliveryMode, HistoryUnavailable, LimitViolation, MeshEvent, MeshObject,
+    PeerBinding, PeerState, PeerStatus, PublisherStats, RaceId, ReconnectConfig, ReconnectStats,
+    RejectReason, Role, SessionEnd, Source, SubscriptionStats, TrackName, TrackPath,
+    LATEST_MAX_PAYLOAD, RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD,
 };
 
 /// Who opens the connection for a pair.
@@ -178,7 +178,15 @@ struct Inner<T: MeshTransport> {
     tasks: Mutex<Vec<AbortHandle>>,
     next_id: AtomicU64,
     closing: AtomicBool,
+    /// WP9: per roster agent, the token bucket its incoming links draw from.
+    admits: Mutex<HashMap<AgentPubKeyB64, (f64, Instant)>>,
 }
+
+/// WP9: incoming links one roster member may open in a burst.
+pub const ADMIT_BURST: f64 = 16.0;
+/// WP9: sustained incoming links per second per roster member: one per WP6
+/// minimum backoff (250 ms), so honest reconnects never reach it.
+pub const ADMIT_RATE_PER_S: f64 = 4.0;
 
 /// A running mesh. Dropping it (or [`MeshSession::close`]) closes every
 /// session (as a deliberate leave) and the transport.
@@ -262,6 +270,7 @@ impl<T: MeshTransport> MeshSession<T> {
             config,
             roster: by_agent,
             by_node,
+            admits: Mutex::new(HashMap::new()),
             peers: Mutex::new(HashMap::new()),
             slots: Mutex::new(slots),
             events,
@@ -612,6 +621,22 @@ impl<T: MeshTransport> Inner<T> {
         });
     }
 
+    /// WP9: draw one admission from `agent`'s bucket (bounded: roster agents only).
+    fn admit(&self, agent: &AgentPubKeyB64) -> bool {
+        let now = Instant::now();
+        let mut admits = self.admits.lock().unwrap();
+        let (tokens, at) = admits.entry(agent.clone()).or_insert((ADMIT_BURST, now));
+        *tokens =
+            (*tokens + now.duration_since(*at).as_secs_f64() * ADMIT_RATE_PER_S).min(ADMIT_BURST);
+        *at = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
     async fn accept_loop(self: Arc<Self>) {
         while let Some(link) = self.transport.accept().await {
             match link {
@@ -633,6 +658,9 @@ impl<T: MeshTransport> Inner<T> {
         };
         if dials(&self.local, &agent) {
             return self.reject(link, Some(agent), &node, RejectReason::WrongDirection);
+        }
+        if !self.admit(&agent) {
+            return self.reject(link, Some(agent), &node, RejectReason::RateLimited);
         }
         // The rightful dialer only dials again after losing its session. If
         // ours still looks alive it is half-open: the new link supersedes it
@@ -1117,6 +1145,7 @@ impl TrackPublisher {
 #[derive(Debug, Clone)]
 enum Failure {
     History { next_seq: u64, reason: String },
+    Limit(String),
     Gap { expected: u64, got: u64 },
     Gone,
     Closed,
@@ -1224,6 +1253,9 @@ impl TrackSubscription {
                             reason: h.reason.clone(),
                         }));
                     }
+                    if let Some(v) = e.downcast_ref::<LimitViolation>() {
+                        return Err(self.fail(Failure::Limit(v.0.clone())));
+                    }
                     let old = self.source.take().expect("matched Some above");
                     self.carried.absorb(&old.stats());
                     drop(old);
@@ -1268,6 +1300,7 @@ impl TrackSubscription {
     fn error(&self, f: Failure) -> MeshError {
         match f {
             Failure::History { next_seq, reason } => MeshError::HistoryExpired { next_seq, reason },
+            Failure::Limit(reason) => MeshError::LimitExceeded(reason),
             Failure::Gap { expected, got } => MeshError::SequenceGap { expected, got },
             Failure::Gone => MeshError::PeerGone(self.peer.clone()),
             Failure::Closed => MeshError::Closed,

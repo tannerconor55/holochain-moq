@@ -32,6 +32,10 @@ pub enum MeshError {
     /// WP6: a `ReliableOrdered` object arrived out of sequence (a gap). Sticky.
     #[error("reliable sequence gap: expected {expected}, got {got}")]
     SequenceGap { expected: u64, got: u64 },
+    /// WP9: the peer broke the delivery contract on this track (see
+    /// [`crate::LimitViolation`]). Sticky: nothing more is read from it.
+    #[error("peer exceeded a delivery limit: {0}")]
+    LimitExceeded(String),
     /// WP6: the peer left, or reconnection to it gave up.
     #[error("peer {0} is gone (left or reconnect gave up)")]
     PeerGone(AgentPubKeyB64),

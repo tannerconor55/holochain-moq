@@ -24,13 +24,14 @@ pub mod types;
 pub use error::MeshError;
 pub use session::{
     backoff_delay, dials, DialPolicy, MeshConfig, MeshSession, TrackPublisher, TrackSubscription,
+    ADMIT_BURST, ADMIT_RATE_PER_S,
 };
 pub use transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 pub use types::{
-    ConnectionKind, DeliveryMode, HistoryUnavailable, LinkCounters, LinkInfo, MeshEvent,
-    MeshObject, PeerBinding, PeerState, PeerStatus, PublisherStats, RaceId, ReconnectConfig,
-    ReconnectStats, RejectReason, Role, SessionEnd, Source, SubscriptionStats, TrackName,
-    TrackPath, LATEST_MAX_PAYLOAD, LATEST_QUEUE, MAX_TRACK_NAME_LEN, RELIABLE_MAX_AGE,
+    ConnectionKind, DeliveryMode, HistoryUnavailable, LimitViolation, LinkCounters, LinkInfo,
+    MeshEvent, MeshObject, PeerBinding, PeerState, PeerStatus, PublisherStats, RaceId,
+    ReconnectConfig, ReconnectStats, RejectReason, Role, SessionEnd, Source, SubscriptionStats,
+    TrackName, TrackPath, LATEST_MAX_PAYLOAD, LATEST_QUEUE, MAX_TRACK_NAME_LEN, RELIABLE_MAX_AGE,
     RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD, RELIABLE_QUEUE,
 };
 

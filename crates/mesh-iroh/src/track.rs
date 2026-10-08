@@ -16,8 +16,9 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use bytes::Bytes;
 use holochain_moq_mesh::{
-    DeliveryMode, HistoryUnavailable, MeshObject, PublisherStats, SubscriptionStats, TrackSink,
-    TrackSource, LATEST_QUEUE, RELIABLE_QUEUE,
+    DeliveryMode, HistoryUnavailable, LimitViolation, MeshObject, PublisherStats,
+    SubscriptionStats, TrackSink, TrackSource, LATEST_MAX_PAYLOAD, LATEST_QUEUE,
+    RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD, RELIABLE_QUEUE,
 };
 use iroh::endpoint::Connection;
 use moq_net::track::Subscription;
@@ -165,6 +166,8 @@ pub(crate) enum End {
         next_seq: u64,
         reason: String,
     },
+    /// WP9: the publisher broke the mode's contract. Sticky, never skipped.
+    Violation(String),
 }
 
 fn end_result(e: &End) -> anyhow::Result<Option<MeshObject>> {
@@ -175,6 +178,7 @@ fn end_result(e: &End) -> anyhow::Result<Option<MeshObject>> {
             next_seq: *next_seq,
             reason: reason.clone(),
         })),
+        End::Violation(why) => Err(anyhow::Error::new(LimitViolation(why.clone()))),
     }
 }
 
@@ -204,6 +208,10 @@ impl LatestShared {
     fn offer(&self, seq: u64, payload: Bytes) {
         let mut s = self.state.lock().unwrap();
         s.stats.received += 1;
+        if payload.len() > LATEST_MAX_PAYLOAD {
+            s.stats.oversized += 1;
+            return;
+        }
         match s.stats.newest_seq {
             Some(n) if seq <= n => {
                 s.stats.stale += 1;
@@ -415,6 +423,8 @@ async fn read_reliable(
     let mut skip = start % g_size;
     // Group -> (consumer, came from history via fetch).
     let mut pending: BTreeMap<u64, (group::Consumer, bool)> = BTreeMap::new();
+    // WP9: payload bytes this reader received; no track legitimately holds more.
+    let mut bytes: u64 = 0;
     let gap = |group: u64, skip: u64, reason: String| End::HistoryGap {
         next_seq: (group * g_size + skip).max(start),
         reason,
@@ -426,6 +436,29 @@ async fn read_reliable(
                 match g.read_frame().await {
                     Ok(Some(f)) => {
                         let seq = expected * g_size + index;
+                        if index >= g_size {
+                            return End::Violation(format!(
+                                "group {expected} has more than {g_size} objects"
+                            ));
+                        }
+                        if f.payload.len() > RELIABLE_MAX_PAYLOAD {
+                            shared.stats.lock().unwrap().oversized += 1;
+                            return End::Violation(format!(
+                                "object {seq} of {} bytes exceeds {RELIABLE_MAX_PAYLOAD}",
+                                f.payload.len()
+                            ));
+                        }
+                        if seq >= RELIABLE_MAX_OBJECTS {
+                            return End::Violation(format!(
+                                "object {seq} exceeds the {RELIABLE_MAX_OBJECTS}-object history"
+                            ));
+                        }
+                        bytes += f.payload.len() as u64;
+                        if bytes > RELIABLE_MAX_BYTES {
+                            return End::Violation(format!(
+                                "more than {RELIABLE_MAX_BYTES} payload bytes on one track"
+                            ));
+                        }
                         index += 1;
                         if index <= skip {
                             shared.stats.lock().unwrap().duplicates += 1;
