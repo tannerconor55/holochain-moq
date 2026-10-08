@@ -15,7 +15,8 @@ pub const MAX_TRACK_NAME_LEN: usize = 64;
 /// publisher: two peers can each publish their own `state`.
 ///
 /// ASCII letters, digits, `-`, `_`, `.` and inner `/`, at most
-/// [`MAX_TRACK_NAME_LEN`] bytes.
+/// [`MAX_TRACK_NAME_LEN`] bytes; no empty, `.` or `..` component (names are
+/// opaque to MoQ, but nothing may look like a path that escapes its source).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TrackName(String);
 
@@ -28,7 +29,9 @@ impl TrackName {
             || !name.chars().all(ok_char)
             || name.starts_with('/')
             || name.ends_with('/')
-            || name.contains("//")
+            || name
+                .split('/')
+                .any(|c| c.is_empty() || c == "." || c == "..")
         {
             return Err(MeshError::InvalidTrackName(name));
         }
@@ -136,7 +139,12 @@ impl fmt::Display for RaceId {
 }
 
 /// Who a track speaks for: a player (its agent key) or an AI grid slot.
-/// WP8 will check that the session publishing a source may speak for it.
+///
+/// WP8: a player's source is published only by that player
+/// ([`crate::MeshSession::publish`]) and read only from that player's own
+/// authenticated session ([`crate::MeshSession::subscribe_source`] refuses
+/// `Agent(x)` from any other peer). Which peer may speak for an AI slot is
+/// host authority, decided above the mesh (`holochain-moq-host`).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Source {
     Agent(AgentPubKeyB64),

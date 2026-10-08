@@ -14,7 +14,7 @@ pub enum MeshError {
     InvalidRaceId(String),
     #[error("invalid source {0:?}")]
     InvalidSource(String),
-    #[error("a mesh may only publish as its own agent or an AI slot")]
+    #[error("a player's source may only be published by, and read from, that player")]
     NotOwnSource,
     #[error("payload of {len} bytes exceeds the {mode:?} limit of {max}")]
     PayloadTooLarge {

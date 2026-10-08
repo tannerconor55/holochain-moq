@@ -40,8 +40,11 @@
 //! `ReliableOrdered` resumes at the next sequence number with no gap and no
 //! duplicate, or fails with [`MeshError::HistoryExpired`].
 //!
-//! Out of scope (later work packages): adding peers after start, per-track
-//! authorization beyond "only the roster" (WP8).
+//! **Authorization (WP8).** The roster is the race's membership snapshot,
+//! built above the mesh from the game's control plane; the mesh enforces it:
+//! only roster identities get a session, a player's tracks are read only from
+//! that player's session, and the race id is fixed per mesh (every path is
+//! `race/<race>/...`). Out of scope: adding peers after start.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -306,8 +309,9 @@ impl<T: MeshTransport> MeshSession<T> {
         self.publish_source(Source::Agent(self.inner.local.clone()), track, mode)
     }
 
-    /// Publish `race/<race>/ai-<slot>/<track>` (the host's AI karts).
-    /// Which peer may do this is not checked yet (WP8).
+    /// Publish `race/<race>/ai-<slot>/<track>` (the host's AI karts). Any
+    /// node may offer it; receivers read AI only from the peer host authority
+    /// names (`holochain-moq-host`), so a non-host's AI is never consumed.
     pub fn publish_ai(
         &self,
         slot: u8,
@@ -361,7 +365,9 @@ impl<T: MeshTransport> MeshSession<T> {
     }
 
     /// Subscribe to `race/<race>/<source>/<track>` as served by `peer` (e.g.
-    /// `Source::Ai(3)` from the host).
+    /// `Source::Ai(3)` from the host). A player's source is accepted only from
+    /// that player's own session (WP8): another peer can never feed this side
+    /// data in a player's name, whatever it publishes.
     pub fn subscribe_source(
         &self,
         peer: &str,
@@ -371,6 +377,9 @@ impl<T: MeshTransport> MeshSession<T> {
     ) -> Result<TrackSubscription, MeshError> {
         if !self.inner.roster.contains_key(peer) {
             return Err(MeshError::NotInRoster(peer.to_string()));
+        }
+        if matches!(&source, Source::Agent(a) if a != peer) {
+            return Err(MeshError::NotOwnSource);
         }
         let path = TrackPath::new(self.inner.race.clone(), source, track);
         let live = self
