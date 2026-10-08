@@ -1207,7 +1207,7 @@ record shapes are unchanged except where noted.
 |---|---|---|
 | hApp (`hc app pack`) | `dna/workdir/gaming_directory/` → `gaming_platform.happ` | `dna/workdir/turbo_kart/` → `turbo_kart.happ` |
 | Role | `gaming_directory` | `turbo_kart` |
-| DNA name / hash | `gaming_directory` / `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` | `turbo_kart` / `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
+| DNA name / hash | `gaming_directory` / `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` | `turbo_kart` / `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` |
 | Integrity / coordinator zome | `moq_directory_integrity` / `moq_directory` | `turbo_kart_integrity` / `turbo_kart` |
 
 Install the platform hApp once per agent and each game hApp under the same `agent_key`.
@@ -1217,7 +1217,7 @@ A game hApp must not include the directory DNA (`CellAlreadyExists`).
 
 - `protocol::lobby` is now `crates/turbo-kart` (`holochain_moq_turbo_kart`), same types.
 - `CreateLobbyInput` / `JoinLobbyInput` lost `endpoint`: a game DNA cannot write presence.
-  Publish presence to the directory (`publish_endpoint_advertisement`) instead;
+  Publish presence to the directory (`publish_signed_presence`, see below) instead;
   `TurboKartClient::{create_lobby, join_lobby}` take it as a separate argument.
 - `get_lobby` (turbo_kart) returns `LobbySnapshot { id, lobby, created_at, status, members:
   Vec<Member>, waitlist }`; `LobbyView::compose(snapshot, presence)` adds each member's
@@ -1226,11 +1226,36 @@ A game hApp must not include the directory DNA (`CellAlreadyExists`).
 - The iroh presence rule is `protocol::check_presence` (`PresenceError`), enforced by the
   directory; `DirectoryError::InvalidPresence` replaces the WP7 lobby error variants.
 
+### Signed presence (directory)
+
+An iroh endpoint advertisement must be signed by its EndpointId (proof of possession).
+
+| Item | Value |
+|---|---|
+| Payload | `protocol::iroh_binding_payload(endpoint_id, agent)` = `b"holochain-moq/gaming-directory/iroh-endpoint-binding/v1\0"` ‖ EndpointId (32 bytes) ‖ the advertising agent's base64 `AgentPubKey` text (UTF-8, last field). Same `CONTEXT ‖ fixed fields` convention as `admission::signing_payload`; distinct context. Dial hints are **not** signed: they are reachability hints, not identity |
+| Signature | Ed25519 by the iroh secret key whose public key is `transport_identity.fingerprint` (the EndpointId), as `BindingSignature { r, s }` (64 bytes, fixed by type); static per (EndpointId, agent), reused by refreshes |
+| Call | `publish_signed_presence(SignedPresence { advertisement, binding_signature })` → `ActionHash` |
+| Entry | `PeerEndpointEntry` gained `binding_signature: Option<BindingSignature>` (`#[serde(default)]`) |
+| Validation (iroh kind) | author = `peer_endpoint.agent`; signature present and verifies (`verify_signature_raw` with the EndpointId as an Ed25519 key); address parses as `IrohHints`; expires within 15 min (`check_presence`) |
+| Other kinds | unchanged; `publish_endpoint` / `publish_endpoint_advertisement` still serve them, and reject an iroh endpoint (no signature) |
+
+Bridge: `HolochainPeerDirectory::{presence(endpoint, binding_signature, now_ms, ttl_ms),
+publish_signed_presence, publish_presence(endpoint, binding_signature)}`,
+`PresenceRefresher::spawn(dir, endpoint, binding_signature)`. The caller signs with the
+key it binds iroh with (`IrohConfig::secret_key`; `SecretKey::sign(&iroh_binding_payload(&id, agent))`, then `BindingSignature::from_bytes`): the bridge
+holds no transport keys.
+
 ### Game registry (directory)
+
+A game is `GameKey { developer, game_id }`. Every rule below is integrity validation
+unless marked "reader".
 
 | Function | Input → output | Rule |
 |---|---|---|
-| `register_game` | `Game { game_id, name, developer }` → `ActionHash` | `developer` = author; links `platform.game.<game_id>` and `platform.games` |
-| `publish_release` | `PublishReleaseInput { game: <ActionHash b64 of the GameEntry>, release }` → `ActionHash` | author = the game's developer; `release.game_id` = the game's; `GameRelease::validate` (safe paths, DNA hash shape, platforms) |
-| `get_game` | `game_id` → `Option<GameView { id, game, registered_at, releases }>` | first registration of the id wins (earliest action); releases newest version first, ≤ 64 |
-| `list_games` | `limit` → `Vec<GameSummary>` | first registration per id; ≤ 50 |
+| `register_game` | `Game { game_id, name, developer }` → `ActionHash` | `developer` = author; valid id/name; no earlier `GameEntry` with this `game_id` on the author's chain (`must_get_agent_activity` to genesis); links `platform.game.<game_id>` (tag = developer's raw 39-byte key) and `platform.games` |
+| `publish_release` | `PublishReleaseInput { game: <ActionHash b64 of the GameEntry>, release }` → `ActionHash` | author = the game's developer; `release.game_id` = the game's; `GameRelease::validate` (version ≠ 0.0.0, `protocol_version` ≥ 1, DNA hash shape, safe paths, platforms); `dna_hash` ≠ the directory's own; `GameReleaseEntry.previous` (set by the coordinator from the caller's chain) is the game entry or the latest release, and `check_successor` holds (strictly newer version, `protocol_version` not lower); no other release of the game between `previous` and this action on the author's chain |
+| `get_game` | `GameKey` → `Option<GameView { id, game, registered_at, releases }>` | reader: only that developer's link (tag prefix); releases newest version first, ≤ 64 |
+| `find_games` | `game_id` → `Vec<GameSummary>` | reader: every developer's registration of the id, ordered by developer key, ≤ 16; none is ranked first |
+| `list_games` | `limit` → `Vec<GameSummary>` | reader: one line per `(developer, game_id)`; ≤ 50 |
+
+`registered_at` is the author-stated action time: shown, never used to decide anything.

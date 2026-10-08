@@ -78,6 +78,8 @@ These are hard constraints unless a task explicitly changes them.
 
 21. **Releases are verified, not trusted by source.** A download source provides bytes; the developer-authored release entry (SHA-256, size, DNA hash) decides whether they are the expected release.
 
+22. **Platform governance is per author, never by timestamp.** A registry game is `(developer, game_id)`: one registration per developer and id, releases one strictly-newer chain per game, all checked in validation from the author's own chain. Never decide ownership by "earliest" action time (author-chosen) or by global uniqueness (not visible to validation). An iroh presence record must carry the EndpointId's signature over `protocol::iroh_binding_payload(endpoint_id, agent)` (dial hints are not signed: they are not identity). See ARCHITECTURE.md "Gaming platform contracts".
+
 ## Current architecture
 
 ```text

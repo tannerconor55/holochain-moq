@@ -1189,10 +1189,14 @@ cargo test -p holochain-moq-e2e --test boundaries                               
 | DNA | Hash |
 |---|---|
 | `moq_directory` (WP7, before) | `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` |
-| `gaming_directory` | `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` |
-| `turbo_kart` | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
+| `gaming_directory` (split) | `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` |
+| `turbo_kart` (split) | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
+| `gaming_directory` (registry governance, signed presence) | `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` |
+| `turbo_kart` (shared `protocol` changed) | `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` |
 
-Implemented: the two DNAs and hApps, the game registry (register, release, read, list),
+Implemented: the two DNAs and hApps, the game registry (register, release, read, list)
+with governance (one registration per developer and id, one strictly-newer release chain
+per game), signed iroh presence (an EndpointId binds only to an agent it signed for),
 bounded presence reads, the Turbo Kart client, isolation tests. Not implemented: the Hub
 (install/launch), marketplace, spectator streaming, Cubyz/Saber DNAs.
 
@@ -1200,6 +1204,7 @@ bounded presence reads, the Turbo Kart client, isolation tests. Not implemented:
 
 - Both network identities changed; nothing was migrated (no deployed data).
 - Lobby + presence are composed client-side (≤ 8 directory reads per `get_lobby`), across two networks that can be momentarily out of step.
-- Registry: first registration of a `game_id` owns it; no curation or key rotation.
+- Registry: a game is `(developer, game_id)`; the DNA cannot reserve a `game_id` globally (no global first-registration rule is deterministic), so the Hub must pin the developer key. No curation, no developer key rotation.
+- Registration and release validation walk the developer's own chain (registration: to genesis; release: since the previous release), so their cost grows with that chain. A dedicated release key keeps it small.
 - The directory zomes keep the historical name `moq_directory` (media tools and bridge unchanged).
 - No real Internet / NAT / multi-machine validation.

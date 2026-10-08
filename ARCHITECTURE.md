@@ -1337,9 +1337,10 @@ Migration steps (one change, before WP8 consumes the lobby snapshot) - **done**,
 4. Bridge: one directory handle per app/role; a kart adapter composes lobby + presence.
 5. WP7 tests ported to two DNAs; the zero-call race test kept as is.
 
-### Game registry (types implemented, entries planned)
+### Game registry (types; stored since the platform split)
 
-`holochain-moq-platform` (`crates/platform`) fixes the contract; nothing is stored yet.
+`holochain-moq-platform` (`crates/platform`) fixes the contract. Since the DNA split it is
+stored in the `gaming_directory` DNA; governance: "Gaming platform contracts" below.
 
 - `Game { game_id, name, developer }`: `game_id` is `[a-z][a-z0-9-]`, 3–32, stable
   forever; it names the game's DNA namespace and install directory. `developer` is the
@@ -1357,7 +1358,7 @@ newest valid release (a reader rule).
 | Operation | Meaning |
 |---|---|
 | `list_games()` | registry games, newest release each, filtered to the local platform |
-| `get_game(game_id)` | the game, its releases, and the developer key the Hub pinned |
+| `get_game(developer, game_id)` | the game, its releases; the Hub pins the developer key (a `game_id` alone does not name a game) |
 | `install_game(game_id, version)` | fetch the release entry → `check_update` → download each artifact from any source → verify SHA-256 + size → place under the game's directory by its validated relative path → install the game hApp under the player's agent key, refusing it unless its DNA hashes to `dna_hash` |
 | `uninstall_game(game_id)` | remove files and uninstall the game hApp (the game's DHT data stays on its network; the shared identity is untouched) |
 | `launch_game(game_id)` | start the executable with a handle to its own app (and read-only access to the directory), never the Hub's admin interface |
@@ -1372,12 +1373,12 @@ bytes are the expected release.**
 |---|---|
 | Tampered or substituted executable | artifact SHA-256 + size from a release entry signed (authored) by the developer key |
 | Wrong or tampered game DNA | the packed DNA must hash to the release's `dna_hash` before install |
-| Malicious registry entry for an existing game | releases count only if authored by the game's `developer`; first registration of a `game_id` owns it (reader rule, as for stream ids) and the Hub pins the developer key on first install (trust on first use), so a later squatter cannot take over an installed game |
-| Squatting a new popular `game_id` | not prevented by the DNA; mitigated by a curated allowlist / verified-publisher list in the Hub (open question) |
-| Downgrade or same-version substitution | `check_update` refuses lower versions and a different release under the installed version |
+| Malicious registry entry for an existing game | a game is `(developer, game_id)`: another key's registration of the same id is a different game, never a takeover; releases are valid only if authored by the game's developer (validation); the Hub pins the developer key (trust on first use or a curated list) |
+| Squatting a new popular `game_id` | not preventable deterministically (no global ordering: validation cannot see other agents' registrations, and action timestamps are author-chosen); `find_games` shows every registrant, and a curated allowlist / verified-publisher list in the Hub is the mitigation (open question) |
+| Downgrade or same-version substitution | the registry accepts only a strictly newer release chain per game (validation: `check_successor`, no fork); the Hub's `check_update` also refuses lower versions and a different release under the installed version |
 | Path traversal in a package | `safe_package_path`: relative, `/`-separated, `[A-Za-z0-9._-]` components, no `.`/`..`/hidden components, bounded |
 | Untrusted download source / mirror / P2P | irrelevant to trust: bytes are verified before use |
-| Incompatible peers | equal `protocol_version` required to share a session |
+| Incompatible peers | equal `protocol_version` required to share a session; a release cannot lower it below its predecessor's (validation) |
 | Compromised developer key | **not handled**: needs key rotation/revocation (open question; DeepKey/DPKI is not in the 0.7 SDK) |
 
 Not implemented here: downloading, hashing files, installing apps, signature tooling,
@@ -1612,8 +1613,8 @@ The migration planned in "Gaming hApp / Multi-Game Architecture" is done: the co
 |---|---|---|
 | Entries | `Peer`, `PeerEndpointEntry` (endpoint advertisement / presence), `StreamAdvertisement`, `SessionRecord`, `GameEntry`, `GameReleaseEntry` | `LobbyEntry`, `LobbyJoinEntry`, `LobbyLeaveEntry`, `LobbyStatusEntry`, `RaceResultEntry` |
 | Links | agent → peer / endpoint / stream; stream and session indexes; `GameIdToGame`, `AllGames`, `GameToRelease` | `LobbyBucket`, `LobbyToJoin`, `LobbyToLeave`, `LobbyToStatus`, `AgentToResult`, `LeaderboardBand` |
-| Rules | author = named agent; iroh presence must expire (≤ 15 min); a game's `developer` is its author; releases only by that developer, for that `game_id`, with safe package paths | everything WP7 enforced, unchanged (author binding, host-only status, invite proofs, bounds, plausibility) |
-| Functions | `publish_endpoint(_advertisement)`, `get_peer`, `get_endpoint_advertisements`, `get_recent_endpoint_advertisements` (newest 4), streams, sessions, `sign_admission_proof`, `register_game`, `publish_release`, `get_game`, `list_games` | `create_lobby`, `list_open_lobbies`, `join_lobby`, `leave_lobby`, `get_lobby` (returns a `LobbySnapshot`, no presence), `set_lobby_status`, `publish_result`, `get_leaderboard` |
+| Rules | author = named agent; iroh presence must expire (≤ 15 min) and be signed by its EndpointId; a game's `developer` is its author, one registration per developer and id; releases only by that developer, for that `game_id`, safe package paths, one strictly-newer chain per game | everything WP7 enforced, unchanged (author binding, host-only status, invite proofs, bounds, plausibility) |
+| Functions | `publish_endpoint(_advertisement)`, `publish_signed_presence`, `get_peer`, `get_endpoint_advertisements`, `get_recent_endpoint_advertisements` (newest 4), streams, sessions, `sign_admission_proof`, `register_game`, `publish_release`, `get_game`, `find_games`, `list_games` | `create_lobby`, `list_open_lobbies`, `join_lobby`, `leave_lobby`, `get_lobby` (returns a `LobbySnapshot`, no presence), `set_lobby_status`, `publish_result`, `get_leaderboard` |
 | Types | `crates/protocol` (identity, endpoints, presence rule, hash text), `crates/platform` (registry) | `crates/turbo-kart` (moved from `protocol::lobby`) |
 | Zome names | `moq_directory_integrity` / `moq_directory` (historical names kept, so the media tools and the bridge are unchanged) | `turbo_kart_integrity` / `turbo_kart` |
 
@@ -1665,6 +1666,8 @@ second-game fixture) has no kart dependency even for tests.
 | `moq_directory` (WP7, before the split) | `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` | — |
 | `gaming_directory` | `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` | lobby entries removed, registry entries added, presence rule moved to `protocol::presence`: integrity code changed |
 | `turbo_kart` (new) | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` | new DNA |
+| `gaming_directory` (registry governance) | `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` | signed iroh presence, registry governance (chain walks, release chain, developer-tagged id links), `crates/platform` and `crates/protocol` changes: integrity code changed |
+| `turbo_kart` (registry governance) | `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` | no Turbo Kart change: `crates/protocol` (compiled into it) gained the signed-presence types and the iroh-address check |
 
 Both are new networks; nothing is migrated (no deployed data existed). Recorded after
 `cargo fmt` on the DNA workspace: formatting alone changed both hashes (source line
@@ -1683,17 +1686,130 @@ exactly the production rules. The DNA manifest name does not affect the hash.
   game → game-net → mesh / MoQ / iroh. No streaming was added; the media/AV1/camera code is
   untouched.
 
+Both future services are **platform-level** (beside the registry, keyed by
+`(developer, game_id)` and the player's `AgentPubKey`) and must **not**:
+
+- enter the realtime `mesh` / `mesh-iroh` / `clock` / `host`, or `kart-wire`;
+- enter Turbo Kart's simulation or any game's per-frame state;
+- carry per-frame game state through Holochain, or need a Holochain call per realtime
+  object (setup-time reads only, as for presence: zero calls in steady state);
+- make the Gaming Directory depend on, or name, a specific game.
+
 ### Known limitations (platform split)
 
 - **Two network identities changed** (above). Old WP7 data is on the old network.
 - **Composition is client-side**: `get_lobby` makes one directory read per admitted
   member (≤ 8). Presence is read through the directory network, lobbies through the
   game's, so the two can be momentarily out of step (eventual consistency).
-- **Registry governance is minimal**: first registration of a `game_id` owns it (reader
-  rule); no curation, no key rotation, no squatting protection beyond that.
+- **Registry governance is minimal**: see "Gaming platform contracts" below (no global
+  `game_id` reservation, no curation, no developer key rotation).
 - **The directory zomes keep the name `moq_directory`** for compatibility with the media
   tools and the bridge defaults; only the DNA and role are named `gaming_directory`.
 - **Game-neutral mechanisms** (invite proofs, membership and status resolution) live in
   `crates/turbo-kart`; they move to a shared helper when a second game needs them.
 - **No real Internet / NAT / multi-machine validation**; conductors are in-process
   sweettest conductors on one machine.
+
+## Gaming platform contracts (registry governance, identity, installation)
+
+A **platform foundation**, not a store, launcher, marketplace or streaming system: it
+fixes who may write what in the shared `gaming_directory` DNA, and what a game hApp may
+rely on. Nothing here downloads, installs or launches anything.
+
+### What existed before this audit
+
+- Registry: `Game` / `GameRelease` / `ReleaseArtifact` / `Version` / `Platform` with
+  `validate` (id, name, DNA hash shape, safe paths, sizes, platforms), `check_update` for
+  the Hub; validation bound a game to its developer and releases to that developer.
+- "First registration of a `game_id` wins" was **only a reader rule** in `get_game` /
+  `list_games` (earliest action time). Validation let any agent register any id, and let a
+  developer publish the same version twice (readers deduplicated arbitrarily).
+- Presence: iroh advertisements had to be the author's own and expire (≤ 15 min);
+  `live_endpoints` dropped expired ones; the mesh refused a roster binding two agents to one
+  EndpointId. Any agent could still advertise another's public EndpointId as its own, so a
+  lobby member could make race setup fail for everyone (the WP7 test documented this).
+
+### Why not "first registration wins"
+
+Validation sees only the op and what it `must_get`s: it cannot ask "has anyone else
+registered this id?". And action timestamps are author-chosen: Holochain 0.7's system
+validation only checks that they increase along each author's chain (checked in the 0.7.0
+`sys_validate` source; there is no origin-time floor), so "earliest" can be backdated.
+Global first-come ownership therefore needs a single ordering authority (e.g. a
+progenitor/registrar key in the DNA properties), which is a policy decision, not
+implemented. What *is* deterministic is anything on one author's own chain.
+
+### Registry governance (implemented)
+
+| Question | Rule | Enforced by |
+|---|---|---|
+| What is a game? | `GameKey { developer, game_id }`. The same `game_id` under two keys is two games; readers never merge or rank them | type + readers |
+| Who may register? | any agent, only as `developer` = itself | validation (author) |
+| `game_id` | `[a-z][a-z0-9-]`, 3–32 bytes, no `--`, no trailing `-` | validation |
+| Conflicting registration | the same developer registering an id again (any name) is rejected: no earlier `GameEntry` with that id on the author's chain | validation (`must_get_agent_activity` to genesis) |
+| Who may publish releases? | only the game's developer | validation (author of the referenced `GameEntry`) |
+| Release association | `GameReleaseEntry { game, previous, release }`: `game` is the `GameEntry` action hash; `release.game_id` must match | validation |
+| Ordering | `previous` is the game entry (first release) or the release before; `check_successor`: strictly newer version (no duplicate, no downgrade, so no same-version substitution), `protocol_version` not lower; no other release of that game between `previous` and this one on the developer's chain (no fork) | validation (`must_get_valid_record`, `must_get_agent_activity` bounded by `previous`) |
+| Valid release | `version` ≠ 0.0.0; `protocol_version` ≥ 1; `dna_hash` shaped like a DNA hash and ≠ the directory's own (a game cannot claim the platform DNA); 1–8 artifacts, one per platform, size 1 B–8 GiB, safe relative package paths | validation (`GameRelease::validate`, `dna_info`) |
+| Immutability | entries and links are append-only (updates and deletes rejected), so `game_id`, developer and every published release are permanent | validation |
+| Index links | `platform.game.<id>` → game, tagged with the developer's key (exact lookup by `GameKey`, unaffected by other registrants); `platform.games` → game; game → release; each only by the target's author and matching it | validation |
+| Reads | `get_game(GameKey)`, `find_games(game_id)` (every registrant, by developer key, ≤ 16), `list_games(limit)` (≤ 50) | coordinator |
+
+No token, chain, NFT, voting or central server. Cost: registration walks the developer's
+whole chain once and a release the stretch since the previous release, so a long-lived
+playing key that also publishes pays for its presence history; a dedicated release key
+keeps both small.
+
+### Identity and presence
+
+```text
+AgentPubKey (Holochain, signs every action)
+   ↓  author of a PeerEndpointEntry in the gaming directory           [validation: author]
+gaming-directory identity: PeerEndpoint { agent, Iroh endpoint }
+   ↓  EndpointId's Ed25519 signature over iroh_binding_payload(EndpointId, agent) [validation: proof of possession]
+verified iroh EndpointId (+ dial hints, expiry ≤ 15 min)               [validation: check_presence]
+   ↓  live_endpoints at race setup (expired ⇒ absent)                  [reader]
+transport connection: iroh authenticates the EndpointId in the handshake; the mesh admits
+   only the roster's EndpointId for each agent (one agent per EndpointId)  [mesh, unchanged]
+   ↓
+game membership: the game's own DNA (e.g. Turbo Kart lobby joins, by AgentPubKey)
+   ↓
+game realtime authorization: the roster built from membership × presence (WP8: per track)
+```
+
+There is one canonical mapping: a validated, unexpired `PeerEndpointEntry` in the gaming
+directory. Games do not duplicate it: a game DNA has no identity or presence records, and
+a game client reads presence through the bridge (`find_recent_advertisements`) and
+`live_endpoints`.
+
+| Check | Finding / rule |
+|---|---|
+| Duplicate EndpointId claims | **fixed**: before, anyone could advertise another agent's public EndpointId (no impersonation - iroh authenticates the key - but the mesh refuses such a roster, so one lobby member could block a race). Now an iroh advertisement must carry the EndpointId's own signature over the advertising agent (`SignedPresence`), verified in validation with `verify_signature_raw` (the EndpointId is an Ed25519 key). One EndpointId binds to two agents only if its holder signed for both. The mesh's roster check stays as defence in depth |
+| Expiry | must be stated, ≤ 15 min (validation); judged by readers with their own clock; expiry never mutates the DHT |
+| Refresh | `PresenceRefresher` republishes every 60 s with a 120 s validity, reusing the static binding signature |
+| Signed payload | `"holochain-moq/gaming-directory/iroh-endpoint-binding/v1\0"` ‖ EndpointId ‖ agent: versioned, domain-separated from the admission proof (the repo's only other signed payload), and naming both ends. Dial hints (relay URL, IP) are not signed and are not identity: changing them keeps the binding; they are only syntax-checked |
+| Malformed EndpointId | a 32-byte value that is not an Ed25519 key cannot verify: rejected |
+| Collusion | one EndpointId binds to two agents only if its key signed both claims (one holder): accepted by the DNA, refused by the mesh roster check |
+| Stale endpoints | stored forever (append-only), never live after `expires_at`; readers read the newest 4 per agent |
+| Malformed records | expiry not after publication, a missing signature or one that does not verify, an iroh address that does not parse as dial hints: rejected by validation |
+| Game clients duplicating identity logic | no: the Turbo Kart client composes presence from the directory, it does not re-implement it |
+| Turbo Kart assumptions in the platform layer | none found (boundary tests keep `protocol`, `platform`, the bridge, `node` and the directory free of Turbo Kart names); the bridge's comments speak of "race setup", which is generic session setup |
+| Transport code | unchanged: the binding is signed by the caller with the key it gives `IrohConfig::secret_key` (an existing option) |
+
+Other endpoint kinds (the media stack's `Direct` / `Relay`, TLS fingerprints) are
+unchanged and need no signature.
+
+### Installation and discovery contract
+
+| | Gaming Platform hApp (`gaming_platform`, role `gaming_directory`) | A game hApp (e.g. `turbo_kart`) |
+|---|---|---|
+| Holds | identity, presence and endpoint discovery, streams/sessions, the game registry and release metadata | only its own DNA: game-specific records and rules |
+| Installed | once per player | per game, under the platform's `agent_key` |
+| Must not | name or depend on any game | bundle the directory DNA (`CellAlreadyExists`), store identity or presence, call another game's DNA |
+| Found by | — | its registry release: `dna_hash` pins the game DNA the Hub must install; it can never be the directory's own hash |
+
+Player A (platform + Turbo Kart) and Player B (platform + Turbo Kart + Cubyz) meet on the
+directory network and the Turbo Kart network (same DNA hash). Cubyz exists only on its own
+network: Turbo Kart's DNA has no dependency on it, nor it on Turbo Kart; a game's cell
+reads nothing but its own DNA, and the client composes it with the directory natively.
+Not built: downloader, store, launcher, Hub (see "Gaming Hub contract").
