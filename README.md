@@ -31,6 +31,7 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP5 | Host authority: epochs, deterministic election, heartbeat failure detection, host-owned AI tracks, migration with resume, stale-epoch rejection | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/host`. **Not tested on the real Internet or between machines** |
 | WP7 | Lobby control plane in the DNA: lobbies, membership, characters, host-only status, self-reported results, leaderboards, expiring iroh presence | **done, tested on real conductors** (in-process sweettest, two and three conductors, loopback websockets) - `dna/`, `crates/protocol/src/lobby.rs`, `crates/hdk-bridge/src/lobby.rs`. **Not tested between machines or over the Internet** |
 | WP6 | Reconnect and recovery: per-peer state machine, 250 ms → 4 s backoff with a 15 s give-up, re-authenticated sessions, self-healing subscriptions (`Latest` resumes at current state, `ReliableOrdered` resumes without gap or duplicate or fails with `HistoryExpired`) | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/mesh`, `crates/mesh-iroh`. **Real Internet / NAT reconnect not tested** |
+| Platform split | `gaming_directory` DNA (identity, presence, game registry) + `turbo_kart` DNA (lobbies, races, results), one agent across both apps | **done, tested on real in-process conductors** - `dna/gaming_directory`, `dna/turbo_kart`, `crates/turbo-kart`, `crates/turbo-kart-client`, `crates/platform`. **Not tested between machines** |
 | WP8 / WP9 / WP10 | Track admission / hardening and rate limits / Tauri bridge | **not started** |
 | Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
@@ -139,7 +140,7 @@ prereleases and were not used.
 
 ```bash
 # DNA -> wasm (flags live in dna/.cargo/config.toml) and pack
-cd dna && cargo build --release --target wasm32-unknown-unknown && hc dna pack workdir && cd ..
+cd dna && cargo build --release --target wasm32-unknown-unknown && hc dna pack workdir/gaming_directory && hc dna pack workdir/turbo_kart && cd ..
 # DNA behaviour on real conductors (validation accept/reject, links, coordinator fns)
 cargo test -p holochain-moq-e2e --test dna_sweettest -- --test-threads=1
 # The acceptance test: two conductors, Holochain discovery -> TLS pin -> MoQ payload,
@@ -1037,7 +1038,7 @@ cargo test -p holochain-moq-e2e --test lobby_validation -- --test-threads=1    #
 cargo test -p holochain-moq-e2e --test lobby -- --test-threads=1 --nocapture   # two-conductor flow, lifecycle, presence, numbers
 ```
 
-The tests build the zomes and pack both `dna/workdir` (production) and `dna/workdir/forge`
+*(Since the platform split the lobby records live in the `turbo_kart` DNA: see "Gaming platform DNA split".)* The tests build the zomes and pack both `dna/workdir` (production) and `dna/workdir/forge`
 (test only: production integrity + a coordinator that commits records unchecked, so
 forged records reach validation). The rebuilt bundles are not committed.
 
@@ -1165,3 +1166,40 @@ cache expiry), not the documented 30 min; the publish origin now keeps it for
 - A late subscriber to a track whose publisher was dropped hangs (moq-net 0.3.10); publishers must live for the race.
 - A peer restarting with a new EndpointId needs a new roster (race setup), not a reconnect.
 - No rate limit on reconnect churn from a hostile roster member (WP8/WP9).
+
+## Gaming platform DNA split
+
+```text
+platform hApp (gaming_directory DNA)          Turbo Kart hApp (turbo_kart DNA)
+  identity, presence (AgentPubKey<->EndpointId)  lobbies, membership, status, results, leaderboard
+  streams / sessions, game registry              (no identity or presence of its own)
+                 \________ same agent key, composed natively by turbo-kart-client ________/
+```
+
+```bash
+cd dna && cargo build --release --target wasm32-unknown-unknown \
+  && hc dna pack workdir/gaming_directory && hc app pack workdir/gaming_directory \
+  && hc dna pack workdir/turbo_kart && hc app pack workdir/turbo_kart && cd ..
+cargo test -p holochain-moq-e2e --test directory_validation -- --test-threads=1   # presence, registry, DNA isolation
+cargo test -p holochain-moq-e2e --test lobby_validation -- --test-threads=1       # Turbo Kart rules, forged authors
+cargo test -p holochain-moq-e2e --test lobby -- --test-threads=1 --nocapture      # two conductors, zero-call race window
+cargo test -p holochain-moq-e2e --test boundaries                                 # platform / game / realtime boundaries
+```
+
+| DNA | Hash |
+|---|---|
+| `moq_directory` (WP7, before) | `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` |
+| `gaming_directory` | `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` |
+| `turbo_kart` | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
+
+Implemented: the two DNAs and hApps, the game registry (register, release, read, list),
+bounded presence reads, the Turbo Kart client, isolation tests. Not implemented: the Hub
+(install/launch), marketplace, spectator streaming, Cubyz/Saber DNAs.
+
+### Known limitations (platform split)
+
+- Both network identities changed; nothing was migrated (no deployed data).
+- Lobby + presence are composed client-side (≤ 8 directory reads per `get_lobby`), across two networks that can be momentarily out of step.
+- Registry: first registration of a `game_id` owns it; no curation or key rotation.
+- The directory zomes keep the historical name `moq_directory` (media tools and bridge unchanged).
+- No real Internet / NAT / multi-machine validation.

@@ -444,7 +444,7 @@ from `TypedAction::author()`; recent rustc needs
 `hc` 0.7 manifests use `path:` not `bundled:`; `protocol`'s `uuid` dependency
 dropped its `v4` feature so it builds for wasm.
 
-**DNA** (`dna/`, own Cargo workspace; `dna/workdir/dna.yaml`, `happ.yaml`):
+**DNA** (`dna/`, own Cargo workspace; since the platform split `dna/workdir/gaming_directory/{dna,happ}.yaml`):
 integrity zome `moq_directory_integrity`, coordinator zome `moq_directory`.
 
 **Entry types** wrap the protocol types directly (no duplicate model):
@@ -1055,6 +1055,10 @@ Decoding rejects:
 
 ## WP7: lobby control plane (`moq_directory` DNA, `protocol::lobby`)
 
+*Since the platform split these records, functions and types live in the `turbo_kart`
+DNA and `crates/turbo-kart`; presence and identity stay in the gaming directory. See
+"Gaming platform DNA split" below. The formats are unchanged.*
+
 Durable control-plane records only; none of this is read or written during a race. The
 race runs from one `get_lobby` snapshot taken at setup. Types: `crates/protocol/src/lobby.rs`
 (shared by the zomes and native code); design: ARCHITECTURE.md "Lobby control plane (WP7)".
@@ -1191,3 +1195,42 @@ contracts. What a peer can rely on:
   error (`HistoryExpired` / `SequenceGap`), never a skip.
 - Publisher history: retained while read or written within `reliable_max_age`
   (default 30 min idle) and within a 64 MiB cache target, plus the WP3 per-track caps.
+
+## Gaming platform DNA split
+
+Design: ARCHITECTURE.md "Gaming platform DNA split (implemented)". No new wire format;
+record shapes are unchanged except where noted.
+
+### DNAs, hApps, roles, zomes
+
+| | Platform | Turbo Kart |
+|---|---|---|
+| hApp (`hc app pack`) | `dna/workdir/gaming_directory/` → `gaming_platform.happ` | `dna/workdir/turbo_kart/` → `turbo_kart.happ` |
+| Role | `gaming_directory` | `turbo_kart` |
+| DNA name / hash | `gaming_directory` / `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` | `turbo_kart` / `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
+| Integrity / coordinator zome | `moq_directory_integrity` / `moq_directory` | `turbo_kart_integrity` / `turbo_kart` |
+
+Install the platform hApp once per agent and each game hApp under the same `agent_key`.
+A game hApp must not include the directory DNA (`CellAlreadyExists`).
+
+### Changes from WP7
+
+- `protocol::lobby` is now `crates/turbo-kart` (`holochain_moq_turbo_kart`), same types.
+- `CreateLobbyInput` / `JoinLobbyInput` lost `endpoint`: a game DNA cannot write presence.
+  Publish presence to the directory (`publish_endpoint_advertisement`) instead;
+  `TurboKartClient::{create_lobby, join_lobby}` take it as a separate argument.
+- `get_lobby` (turbo_kart) returns `LobbySnapshot { id, lobby, created_at, status, members:
+  Vec<Member>, waitlist }`; `LobbyView::compose(snapshot, presence)` adds each member's
+  advertisements, read with the directory's `get_recent_endpoint_advertisements(agent)`
+  (newest `MAX_RECENT_ADS` = 4, unfiltered by expiry).
+- The iroh presence rule is `protocol::check_presence` (`PresenceError`), enforced by the
+  directory; `DirectoryError::InvalidPresence` replaces the WP7 lobby error variants.
+
+### Game registry (directory)
+
+| Function | Input → output | Rule |
+|---|---|---|
+| `register_game` | `Game { game_id, name, developer }` → `ActionHash` | `developer` = author; links `platform.game.<game_id>` and `platform.games` |
+| `publish_release` | `PublishReleaseInput { game: <ActionHash b64 of the GameEntry>, release }` → `ActionHash` | author = the game's developer; `release.game_id` = the game's; `GameRelease::validate` (safe paths, DNA hash shape, platforms) |
+| `get_game` | `game_id` → `Option<GameView { id, game, registered_at, releases }>` | first registration of the id wins (earliest action); releases newest version first, ≤ 64 |
+| `list_games` | `limit` → `Vec<GameSummary>` | first registration per id; ≤ 50 |

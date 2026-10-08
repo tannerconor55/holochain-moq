@@ -233,7 +233,7 @@ listed the session announced from the publisher's conductor) - this is the real
 
 ```bash
 # Two real conductors, network mem (works without external bootstrap connectivity):
-hc sandbox generate dna/workdir/moq_directory.happ -a moq_directory -n 2 network mem
+hc sandbox generate dna/workdir/gaming_directory/gaming_platform.happ -a moq_directory -n 2 network mem
 hc sandbox run --all -p <PORT_A> -p <PORT_B>
 
 # Publisher (real screenshare CLI, real AV1/QUIC):

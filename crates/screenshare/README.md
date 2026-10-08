@@ -55,9 +55,9 @@ are used so the conductors find each other).
 # 1. Three conductors with the DNA installed. Stage 14D CHANGES the DNA (the Session
 #    record gained `expires_at`), so repack, and make fresh sandboxes.
 cd ~/holochain-moq/dna
-hc dna pack workdir && hc app pack workdir
+hc dna pack workdir/gaming_directory && hc app pack workdir/gaming_directory
 hc sandbox clean
-hc sandbox generate workdir/moq_directory.happ -a moq_directory -n 3 -s myseed
+hc sandbox generate workdir/gaming_directory/gaming_platform.happ -a moq_directory -n 3 -s myseed
 
 # 2. Run all three (keep open). Note the three admin ports it prints (A, B, C).
 hc sandbox run --all

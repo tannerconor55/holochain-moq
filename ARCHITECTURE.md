@@ -1016,6 +1016,9 @@ presence     ─▶ PeerEndpointEntry (existing; iroh ads must expire) ─Agent�
 
 ### Data model
 
+*(Platform split: these entries now live in the `turbo_kart` DNA and their types in
+`crates/turbo-kart`; see "Gaming platform DNA split".)*
+
 | Entry | Fields (see `protocol::lobby`) | Author rule |
 |---|---|---|
 | `LobbyEntry` | `Lobby { name, host, max_players, track_id, class, laps, relay_urls, access }` | `host` = author |
@@ -1148,7 +1151,7 @@ Integrity changes change the DNA hash, so WP7 is a **new network**: agents on th
 pre-WP7 DNA (`uhC0kof1KIK_PxEK6xRXh1rY0bZeb06U9YwsVSKW4Pq4Chj6h_Hl9`, built from
 eea9421) and on the WP7 DNA (`uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN`)
 do not see each other's data. Nothing is migrated; old records stay on the old network.
-The test-only `forge` DNA (`dna/workdir/forge`) has the same hash: coordinator zomes do
+The test-only `forge` DNA (`dna/workdir/forge`; since the split `dna/workdir/<dna>/forge`) has the same hash: coordinator zomes do
 not affect it, so forged-record tests run against exactly the production rules. The
 packed bundles in `dna/workdir` are rebuilt by the tests and, as before, not committed
 (the committed bundle dates from the initial commit).
@@ -1321,7 +1324,8 @@ This is an explicit **migration decision, not done in this task**:
   hash returned to exactly the WP7 value. Rule: nothing goes into `crates/protocol` (or
   any crate a zome compiles) unless a network change is intended.
 
-Migration steps (one change, before WP8 consumes the lobby snapshot):
+Migration steps (one change, before WP8 consumes the lobby snapshot) - **done**, see
+"Gaming platform DNA split":
 
 1. New `dna/turbo_kart` (integrity + coordinator): the lobby entries, validation and
    functions moved as they are, minus the directory coupling (`get_lobby` returns members
@@ -1576,3 +1580,120 @@ old one (`Stale`) are rejected. Exactly one host and one AI publisher remain.
 - **A deposed host is never re-elected** in the same race even after reconnecting (WP5 rule).
 - **Hostile peers (WP8/WP9)**: a roster member could force reconnect churn on its own
   sessions; there is no rate limit on reconnect attempts by the remote yet.
+
+## Gaming platform DNA split (implemented)
+
+The migration planned in "Gaming hApp / Multi-Game Architecture" is done: the combined
+`moq_directory` DNA is now two DNAs with two hApps, under one agent key.
+
+```text
+                         one agent key (AgentPubKey)
+              ┌──────────────────┴───────────────────┐
+  platform hApp `gaming_platform`            game hApp `turbo_kart`
+  role gaming_directory                      role turbo_kart
+  ┌───────────────────────────────┐          ┌──────────────────────────────┐
+  │ gaming_directory DNA          │          │ turbo_kart DNA               │
+  │  Peer, endpoint ads/presence  │          │  Lobby, LobbyJoin, LobbyLeave│
+  │  (AgentPubKey<->EndpointId)   │          │  LobbyStatus/State           │
+  │  stream / session metadata    │          │  RaceResult, leaderboard     │
+  │  admission proofs             │          │  invite proofs, plausibility │
+  │  game registry (Game, Release)│          │  (no identity, no presence)  │
+  └───────────────┬───────────────┘          └──────────────┬───────────────┘
+                  └──── composed natively (no zome-to-zome call) ────┘
+                     turbo-kart-client: get_lobby = snapshot + presence
+                                     │ race setup only
+                                     ▼
+                   generic realtime: mesh · mesh-iroh · clock · host
+```
+
+### Responsibilities
+
+| | `gaming_directory` (platform) | `turbo_kart` (game) |
+|---|---|---|
+| Entries | `Peer`, `PeerEndpointEntry` (endpoint advertisement / presence), `StreamAdvertisement`, `SessionRecord`, `GameEntry`, `GameReleaseEntry` | `LobbyEntry`, `LobbyJoinEntry`, `LobbyLeaveEntry`, `LobbyStatusEntry`, `RaceResultEntry` |
+| Links | agent → peer / endpoint / stream; stream and session indexes; `GameIdToGame`, `AllGames`, `GameToRelease` | `LobbyBucket`, `LobbyToJoin`, `LobbyToLeave`, `LobbyToStatus`, `AgentToResult`, `LeaderboardBand` |
+| Rules | author = named agent; iroh presence must expire (≤ 15 min); a game's `developer` is its author; releases only by that developer, for that `game_id`, with safe package paths | everything WP7 enforced, unchanged (author binding, host-only status, invite proofs, bounds, plausibility) |
+| Functions | `publish_endpoint(_advertisement)`, `get_peer`, `get_endpoint_advertisements`, `get_recent_endpoint_advertisements` (newest 4), streams, sessions, `sign_admission_proof`, `register_game`, `publish_release`, `get_game`, `list_games` | `create_lobby`, `list_open_lobbies`, `join_lobby`, `leave_lobby`, `get_lobby` (returns a `LobbySnapshot`, no presence), `set_lobby_status`, `publish_result`, `get_leaderboard` |
+| Types | `crates/protocol` (identity, endpoints, presence rule, hash text), `crates/platform` (registry) | `crates/turbo-kart` (moved from `protocol::lobby`) |
+| Zome names | `moq_directory_integrity` / `moq_directory` (historical names kept, so the media tools and the bridge are unchanged) | `turbo_kart_integrity` / `turbo_kart` |
+
+Turbo Kart's records are not platform records because they carry game rules (tracks,
+lap floors, classes, the racer roster, race plausibility). In the directory, every change
+to them would change the hash of every game's shared platform network and couple
+unrelated games. The directory's remaining records are the same for every game.
+
+### One agent, several DNAs
+
+Holochain 0.7 refuses to install a cell whose `(DNA hash, agent)` already exists
+(`ConductorError::CellAlreadyExists`, checked in the 0.7.0 source). So the directory is
+installed **once per agent** in the platform hApp, and each game hApp ships **only its own
+DNA**, installed with the same `agent_key`. The e2e harness does exactly this
+(`platform_and_kart`: platform app, then the Turbo Kart app under the same agent, and the
+test asserts one agent across both cells and two DNA hashes).
+
+- Player A: platform + Turbo Kart → a directory cell and a Turbo Kart cell.
+- Player B: platform + Turbo Kart + Cubyz → the same, plus a Cubyz cell.
+- They meet on the Turbo Kart network (same DNA hash) and the directory network. Cubyz
+  data exists only on the Cubyz network; A needs no Cubyz anything.
+
+The Turbo Kart DNA authors its records with that same agent key; it has no peer,
+endpoint or presence records (boundary test). The race-setup snapshot is composed
+natively by `crates/turbo-kart-client`: the lobby from the game DNA, each admitted
+member's newest presence from the directory. No zome calls another DNA and no validation
+depends on another DNA.
+
+### Crates
+
+| Crate | Role | May depend on |
+|---|---|---|
+| `protocol` | identity, endpoints, presence rule, hash text (compiled into both DNAs) | — |
+| `platform` | game registry types (compiled into the directory DNA) | protocol |
+| `turbo-kart` | Turbo Kart records and rules (compiled into the Turbo Kart DNA) | protocol |
+| `hdk-bridge` | conductor access, directory client, presence, `call_zome` | protocol, node |
+| `turbo-kart-client` | Turbo Kart lobby API + composition with presence | bridge, turbo-kart |
+| `mesh`, `mesh-iroh`, `clock`, `host` | generic realtime (game-net) | none of the above game or registry crates |
+
+Boundary tests keep this: `protocol`, `platform`, the bridge, `node` and the directory DNA
+never depend on or name Turbo Kart; the Turbo Kart DNA names no identity or presence
+record; the realtime crates know no game and no registry; `crates/host` (with the
+second-game fixture) has no kart dependency even for tests.
+
+### DNA hashes
+
+| DNA | Hash | Why |
+|---|---|---|
+| `moq_directory` (WP7, before the split) | `uhC0kNX8i1bXqIhkNdg0z5__WLM37Bhxi9cKQj3qq8Buxt_uabLUN` | — |
+| `gaming_directory` | `uhC0k5M8_mEmgitxVrUmIwVUhSDnb4obmQxAYULPFcTxgY5VYkYCS` | lobby entries removed, registry entries added, presence rule moved to `protocol::presence`: integrity code changed |
+| `turbo_kart` (new) | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` | new DNA |
+
+Both are new networks; nothing is migrated (no deployed data existed). Recorded after
+`cargo fmt` on the DNA workspace: formatting alone changed both hashes (source line
+numbers end up in the wasm), so hashes are recorded only from formatted sources. The `forge` test
+DNAs hash identically to their production DNAs, so forged-record tests run against
+exactly the production rules. The DNA manifest name does not affect the hash.
+
+### Reserved, not implemented
+
+- **Marketplace** (listings, offers, ownership): a future platform-level DNA or directory
+  extension. No NFTs, wallets, chain or token code exist, and nothing in the split
+  prevents adding them beside the registry.
+- **Spectator / streaming**: stream discovery, spectator authorization and race stream
+  metadata belong with the directory's existing `StreamAdvertisement` / `SessionRecord`
+  records (the media stack's), as a separate concern from gameplay. Gameplay stays
+  game → game-net → mesh / MoQ / iroh. No streaming was added; the media/AV1/camera code is
+  untouched.
+
+### Known limitations (platform split)
+
+- **Two network identities changed** (above). Old WP7 data is on the old network.
+- **Composition is client-side**: `get_lobby` makes one directory read per admitted
+  member (≤ 8). Presence is read through the directory network, lobbies through the
+  game's, so the two can be momentarily out of step (eventual consistency).
+- **Registry governance is minimal**: first registration of a `game_id` owns it (reader
+  rule); no curation, no key rotation, no squatting protection beyond that.
+- **The directory zomes keep the name `moq_directory`** for compatibility with the media
+  tools and the bridge defaults; only the DNA and role are named `gaming_directory`.
+- **Game-neutral mechanisms** (invite proofs, membership and status resolution) live in
+  `crates/turbo-kart`; they move to a shared helper when a second game needs them.
+- **No real Internet / NAT / multi-machine validation**; conductors are in-process
+  sweettest conductors on one machine.
