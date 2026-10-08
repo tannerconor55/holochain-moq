@@ -1957,3 +1957,51 @@ session closed by `mesh-iroh`). None names roster members.
 `Latest` receive rate limiting (see README WP9 limitations), per-message SUBSCRIBE rate
 limits, fair sharing of the early table between members, Internet-scale abuse handling.
 
+## Game bridge (WP10, first slice: lobby control plane)
+
+`crates/kart-net` (`holochain-moq-kart-net`) is the game-facing Rust bridge. A desktop
+shell (Tauri, not yet in the repo) wraps each `KartNet` method in a `#[tauri::command]`;
+the WebView never talks to Holochain or MoQ directly.
+
+```text
+WebView (turbo-kart-rally) ──Tauri IPC: typed serde JSON, low-frequency──▶ KartNet (Rust)
+                                                                              │ lobby CRUD
+                                                                              ▼
+                         TurboKartClient ─▶ conductor: turbo_kart DNA (lobbies, membership,
+                                                       status) + gaming_directory (identity)
+      (later) race start: lobby → RaceAdmission → MeshSession / HostSession ─▶ MoQ over iroh
+```
+
+| Command | Does | Returns |
+|---|---|---|
+| `net_init(NetConfig)` | connects the platform app and the Turbo Kart app; refuses two different agent keys (`AgentMismatch`) | `NetStatus { agent, game_id, control_plane_ready, realtime_active: false }` |
+| `lobby_create` | `create_lobby` (the host's join and `Open` status are written with it) | `LobbyState` |
+| `lobby_list(limit)` | `list_open_lobbies` (bounded by the DNA) | `Vec<LobbyListing>` |
+| `lobby_get(id)` | `get_lobby` | `LobbyState` |
+| `lobby_join` | checks the lobby exists, `join_lobby`, re-reads | `LobbyState` |
+| `lobby_leave(id)` | checks the lobby exists, `leave_lobby`, re-reads | `LeaveOutcome { lobby_id, left, state }` |
+
+`LobbyState` = `{ lobby_id, game_id, name, host, capacity, track_id, class, laps,
+invite_only, status, race_id, members, waitlist, created_at_ms }`, always just read from
+the DNA. Errors are `NetError { code: invalid_input | not_found | agent_mismatch |
+control_plane, message }`. `lobby_events()` is a small typed channel (`Updated` / `Left`)
+fired after this player's own commands, for a future Tauri event.
+
+Rules:
+
+- **Holochain owns lobby identity, membership and status.** The bridge stores none of it
+  and adds no zome functions; it reuses the `turbo_kart` DNA API through `TurboKartClient`.
+- **MoQ is not involved in lobby CRUD.** `kart-net` does not depend on `mesh`, `mesh-iroh`,
+  `clock`, `host` or `kart-wire` (a unit test checks the manifest); lobby calls publish no
+  iroh presence.
+- **JSON/serde is for this low-frequency boundary only**; the future 20–30 Hz kart state
+  path will use binary payloads, not JSON.
+- **Next (not implemented):** race start turns an admitted lobby into the realtime session:
+  publish signed iroh presence, `RaceAdmission::from_view`, start `MeshSession` +
+  `HostSession` (WP8). No Tauri crate, no `net_send_state` / `net_send_event` yet.
+
+Tested against two real conductors with separate agents
+(`crates/holochain-e2e/tests/kart_net.rs`): create → list from the other agent → join →
+both see both members → leave → remaining state; malformed and nonexistent lobby ids;
+an invalid character; a bridge over two different agents refused.
+

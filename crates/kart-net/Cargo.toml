@@ -1,0 +1,19 @@
+[package]
+name = "holochain-moq-kart-net"
+description = "WP10: the game-facing Rust bridge for Turbo Kart (Tauri-agnostic command API). Lobby operations go to Holochain only; no realtime/MoQ dependency."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-protocol = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-turbo-kart = { path = "../turbo-kart" }
+holochain-moq-turbo-kart-client = { path = "../turbo-kart-client" }
+serde = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

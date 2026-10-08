@@ -44,3 +44,5 @@ holochain-moq-clock = { path = "../clock" }
 holochain-moq-platform = { path = "../platform" }
 holochain-moq-turbo-kart = { path = "../turbo-kart" }
 holochain-moq-turbo-kart-client = { path = "../turbo-kart-client" }
+# WP10: the game-facing bridge, driven against real conductors.
+holochain-moq-kart-net = { path = "../kart-net" }

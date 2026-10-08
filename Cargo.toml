@@ -5,6 +5,7 @@ members = [
     "crates/platform",
     "crates/turbo-kart",
     "crates/turbo-kart-client",
+    "crates/kart-net",
     "crates/mesh",
     "crates/mesh-iroh",
     "crates/kart-wire",

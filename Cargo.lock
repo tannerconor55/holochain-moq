@@ -2993,6 +2993,7 @@ dependencies = [
  "holochain-moq-codec-opus",
  "holochain-moq-hdk-bridge",
  "holochain-moq-host",
+ "holochain-moq-kart-net",
  "holochain-moq-mesh",
  "holochain-moq-mesh-iroh",
  "holochain-moq-node",
@@ -3047,6 +3048,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "holochain-moq-kart-net"
+version = "0.1.0"
+dependencies = [
+ "holochain-moq-hdk-bridge",
+ "holochain-moq-node",
+ "holochain-moq-protocol",
+ "holochain-moq-turbo-kart",
+ "holochain-moq-turbo-kart-client",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
