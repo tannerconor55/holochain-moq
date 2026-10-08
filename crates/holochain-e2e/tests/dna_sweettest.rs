@@ -435,16 +435,9 @@ async fn incoherent_and_foreign_sessions_are_rejected_and_ids_cannot_be_taken_ov
     assert_eq!(get_session(&net, BOB, live.session_id).await, Some(live));
 }
 
-/// The zome API is exactly these control-plane functions - nothing
-/// media-shaped (`send_media`/`publish_frame`/...). (`sign_admission_proof` is the one
-/// Stage 14F addition: a signature over a session/challenge, never media. WP7 adds the
-/// lobby functions: durable lobby/membership/status/result records, never game state.)
-#[test]
-fn coordinator_exposes_only_the_control_plane_functions() {
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dna/coordinator/src/lib.rs"),
-    )
-    .unwrap();
+fn extern_names(rel: &str) -> Vec<String> {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+        .unwrap();
     let mut names: Vec<String> = src
         .split("#[hdk_extern]")
         .skip(1)
@@ -460,29 +453,56 @@ fn coordinator_exposes_only_the_control_plane_functions() {
         })
         .collect();
     names.sort();
+    names
+}
+
+/// The gaming directory's zome API is exactly these platform functions -
+/// nothing media-shaped (`send_media`/`publish_frame`/...) and no game's
+/// records. (`sign_admission_proof`, Stage 14F: a signature over a
+/// session/challenge, never media. Platform split: bounded presence reads and
+/// the game registry; the WP7 lobby functions moved to the Turbo Kart DNA.)
+#[test]
+fn coordinator_exposes_only_the_control_plane_functions() {
     assert_eq!(
-        names,
+        extern_names("../../dna/gaming_directory/coordinator/src/lib.rs"),
         [
-            "create_lobby",
             "create_stream",
             "get_endpoint_advertisements",
-            "get_leaderboard",
-            "get_lobby",
+            "get_game",
             "get_peer",
+            "get_recent_endpoint_advertisements",
             "get_session",
             "get_stream",
-            "join_lobby",
-            "leave_lobby",
+            "list_games",
             "list_live_sessions",
-            "list_open_lobbies",
             "list_streams",
             "publish_endpoint",
             "publish_endpoint_advertisement",
-            "publish_result",
+            "publish_release",
             "publish_session",
-            "set_lobby_status",
+            "register_game",
             // Stage 14F: signs a private-session admission proof with the agent's own key.
             "sign_admission_proof"
+        ]
+    );
+}
+
+/// The Turbo Kart DNA's zome API is exactly its lobby functions: durable
+/// lobby/membership/status/result records, never game state and never
+/// identity or presence (those are the gaming directory's).
+#[test]
+fn turbo_kart_coordinator_exposes_only_its_lobby_functions() {
+    assert_eq!(
+        extern_names("../../dna/turbo_kart/coordinator/src/lib.rs"),
+        [
+            "create_lobby",
+            "get_leaderboard",
+            "get_lobby",
+            "join_lobby",
+            "leave_lobby",
+            "list_open_lobbies",
+            "publish_result",
+            "set_lobby_status",
         ]
     );
 }

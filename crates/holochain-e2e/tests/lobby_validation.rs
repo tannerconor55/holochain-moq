@@ -1,22 +1,21 @@
-//! WP7: the integrity zome's lobby rules, on real conductors, with the
-//! coordinator out of the way.
+//! WP7 (Turbo Kart DNA since the platform split): the `turbo_kart` integrity
+//! zome's lobby rules, on real conductors, with the coordinator out of the way.
+//! Each agent runs the platform app (gaming directory) and, under the same
+//! agent key, the Turbo Kart app - the production composition.
 //!
 //! The honest coordinator fills `host`/`player` from the caller and checks
 //! inputs first, so forged records never reach validation through it. These
-//! tests use the TEST-ONLY `forge` coordinator (`dna/forge`, packed only into
-//! `dna/workdir/forge`), which commits exactly what it is given. The integrity
+//! tests use the TEST-ONLY `forge` coordinator (`dna/turbo_kart/forge`, packed
+//! only into `dna/workdir/turbo_kart/forge`), which commits exactly what it is given. The integrity
 //! zome is the production one, so every rejection here is the conductor's
 //! validation refusing the write - not an application-level check.
 
 mod common;
 use common::*;
 use holo_hash::{ActionHash, AgentPubKey};
-use holochain_moq_protocol::lobby::{
-    self, CreateLobbyInput, InviteProof, JoinLobbyInput, Lobby, LobbyAccess, LobbyJoin, LobbyLeave,
-    LobbyState, LobbyStatus, LobbyView, RaceResult,
-};
-use holochain_moq_protocol::{
-    Endpoint, EndpointAdvertisement, EndpointKind, PeerEndpoint, TransportIdentity,
+use holochain_moq_turbo_kart::{
+    self as lobby, CreateLobbyInput, InviteProof, JoinLobbyInput, Lobby, LobbyAccess, LobbyJoin,
+    LobbyLeave, LobbySnapshot, LobbyState, LobbyStatus, RaceResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +30,6 @@ enum ForgeEntry {
     Leave(LobbyLeave),
     Status(LobbyStatus),
     Result(RaceResult),
-    Endpoint(EndpointAdvertisement),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,14 +59,14 @@ struct ForgeLink {
 
 async fn forge(net: &Network, i: usize, e: ForgeEntry) -> Result<ActionHash, String> {
     net.conductors[i]
-        .call_fallible(&net.cells[i].zome("forge"), "forge_entry", e)
+        .call_fallible(&net.kart_cells[i].zome("forge"), "forge_entry", e)
         .await
         .map_err(|e| e.to_string())
 }
 
 async fn link(net: &Network, i: usize, l: ForgeLink) -> Result<ActionHash, String> {
     net.conductors[i]
-        .call_fallible(&net.cells[i].zome("forge"), "forge_link", l)
+        .call_fallible(&net.kart_cells[i].zome("forge"), "forge_link", l)
         .await
         .map_err(|e| e.to_string())
 }
@@ -125,7 +123,6 @@ fn create_input(name: &str, code: Option<&str>) -> CreateLobbyInput {
         relay_urls: vec![],
         character_id: "blaze".into(),
         invite_code: code.map(String::from),
-        endpoint: None,
     }
 }
 
@@ -158,37 +155,24 @@ fn status_of(lobby: &str, state: LobbyState, race_id: Option<&str>) -> LobbyStat
     }
 }
 
-fn iroh_ad(agent: &str, published: i64, expires: Option<i64>) -> EndpointAdvertisement {
-    EndpointAdvertisement {
-        peer_endpoint: PeerEndpoint {
-            agent: agent.into(),
-            endpoint: Endpoint {
-                kind: EndpointKind::Iroh,
-                address: "relay:https://relay.example/".into(),
-                transport_identity: TransportIdentity {
-                    fingerprint: [9; 32],
-                },
-            },
-        },
-        published_at: published,
-        expires_at: expires,
-    }
-}
-
-async fn get_lobby(net: &Network, i: usize, id: &str) -> Option<LobbyView> {
+async fn get_lobby(net: &Network, i: usize, id: &str) -> Option<LobbySnapshot> {
     net.conductors[i]
-        .call(&net.zome(i), "get_lobby", id.to_string())
+        .call(&net.kart_zome(i), "get_lobby", id.to_string())
         .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
-    let net = network_with(2, &forge_dna_bundle()).await;
+    let net = platform_and_kart(2, &dna_bundle(), &kart_forge_dna_bundle()).await;
     let (alice, bob) = (net.agent_b64(ALICE), net.agent_b64(BOB));
 
     // A real lobby from the honest coordinator, and a public one Bob can see.
     let lobby_hash: ActionHash = net.conductors[ALICE]
-        .call(&net.zome(ALICE), "create_lobby", create_input("Cup", None))
+        .call(
+            &net.kart_zome(ALICE),
+            "create_lobby",
+            create_input("Cup", None),
+        )
         .await;
     let lid = lobby_hash.to_string();
     net.settle().await;
@@ -405,36 +389,7 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
         rejected(forge(&net, BOB, ForgeEntry::Result(r)).await, what);
     }
 
-    // ---- Presence ----
-    forge(
-        &net,
-        BOB,
-        ForgeEntry::Endpoint(iroh_ad(&bob, 1_000, Some(121_000))),
-    )
-    .await
-    .expect("a 2-minute iroh advertisement is accepted");
-    rejected(
-        forge(&net, BOB, ForgeEntry::Endpoint(iroh_ad(&bob, 1_000, None))).await,
-        "an iroh advertisement that never expires",
-    );
-    rejected(
-        forge(
-            &net,
-            BOB,
-            ForgeEntry::Endpoint(iroh_ad(&bob, 0, Some(lobby::MAX_PRESENCE_TTL_MS + 1))),
-        )
-        .await,
-        "an iroh advertisement valid for too long",
-    );
-    rejected(
-        forge(
-            &net,
-            BOB,
-            ForgeEntry::Endpoint(iroh_ad(&alice, 1_000, Some(121_000))),
-        )
-        .await,
-        "Bob advertising an iroh endpoint as Alice",
-    );
+    // (Presence rules are the gaming directory's: see directory_validation.rs.)
 
     // ---- Index links ----
     // Bob's valid join, linked under its own lobby: accepted, and it shows up.
@@ -452,7 +407,7 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
     .expect("a join linked under its own lobby is accepted");
     let other_lobby: ActionHash = net.conductors[ALICE]
         .call(
-            &net.zome(ALICE),
+            &net.kart_zome(ALICE),
             "create_lobby",
             create_input("Other", None),
         )
@@ -476,9 +431,8 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
     let alice_join = ActionHash::try_from(
         view.members
             .iter()
-            .find(|m| m.member.player == alice)
+            .find(|m| m.player == alice)
             .unwrap()
-            .member
             .join
             .as_str(),
     )
@@ -590,11 +544,7 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
     // Bob, whose forged join was linked validly. Bob also has a valid forged
     // leave, but it was never linked, so it does not count.
     let view = get_lobby(&net, BOB, &lid).await.unwrap();
-    let mut players: Vec<_> = view
-        .members
-        .iter()
-        .map(|m| m.member.player.clone())
-        .collect();
+    let mut players: Vec<_> = view.members.iter().map(|m| m.player.clone()).collect();
     players.sort();
     let mut want = vec![alice.clone(), bob.clone()];
     want.sort();
@@ -603,7 +553,7 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
     // lobby is still Open as the coordinator left it.
     assert_eq!(view.state(), Some(LobbyState::Open));
     println!(
-        "lobby validation: {} lobby, {} result, 9 join/leave, 3 status, 3 presence and 7 link rejections",
+        "lobby validation: {} lobby, {} result, 9 join/leave, 3 status and 7 link rejections",
         bad_lobbies.len() + 1,
         bad_results.len() + 1
     );
@@ -613,14 +563,14 @@ async fn integrity_rejects_every_forged_or_out_of_bounds_lobby_record() {
 /// verifies under the lobby's code-derived key for *this* player and lobby.
 #[tokio::test(flavor = "multi_thread")]
 async fn integrity_enforces_invite_proofs_and_stores_no_code() {
-    let net = network_with(2, &forge_dna_bundle()).await;
+    let net = platform_and_kart(2, &dna_bundle(), &kart_forge_dna_bundle()).await;
     let bob = net.agent_b64(BOB);
     let alice = net.agent_b64(ALICE);
     const CODE: &str = "violet-HORSE-7731";
 
     let lobby_hash: ActionHash = net.conductors[ALICE]
         .call(
-            &net.zome(ALICE),
+            &net.kart_zome(ALICE),
             "create_lobby",
             create_input("Private", Some(CODE)),
         )
@@ -677,16 +627,15 @@ async fn integrity_enforces_invite_proofs_and_stores_no_code() {
         lobby: lid.clone(),
         character_id: "dotty".into(),
         invite_code: code.map(String::from),
-        endpoint: None,
     };
     for bad in [None, Some("violet-HORSE-7732")] {
         net.conductors[BOB]
-            .call_fallible::<_, ActionHash>(&net.zome(BOB), "join_lobby", join(bad))
+            .call_fallible::<_, ActionHash>(&net.kart_zome(BOB), "join_lobby", join(bad))
             .await
             .expect_err("wrong or missing code");
     }
     net.conductors[BOB]
-        .call_fallible::<_, ActionHash>(&net.zome(BOB), "join_lobby", join(Some(CODE)))
+        .call_fallible::<_, ActionHash>(&net.kart_zome(BOB), "join_lobby", join(Some(CODE)))
         .await
         .expect("right code joins");
     net.settle().await;
@@ -695,9 +644,8 @@ async fn integrity_enforces_invite_proofs_and_stores_no_code() {
     assert_eq!(
         view.members
             .iter()
-            .find(|m| m.member.player == bob)
+            .find(|m| m.player == bob)
             .unwrap()
-            .member
             .character_id,
         "dotty"
     );

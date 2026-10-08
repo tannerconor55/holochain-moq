@@ -40,65 +40,81 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Compile the zomes to wasm and pack `dna/workdir/moq_directory.dna`, once
-/// per test process. Needs the `wasm32-unknown-unknown` target and the `hc`
-/// CLI on PATH (see README.md).
-pub fn dna_bundle() -> PathBuf {
-    static BUILT: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The Turbo Kart app's installed id in the tests (a separate app from the
+/// platform's, under the same agent key - the production composition).
+pub const KART_APP_ID: &str = "turbo-kart-test";
+pub const KART_ZOME: &str = "turbo_kart";
+
+/// Compile every zome to wasm once per test process. Needs the
+/// `wasm32-unknown-unknown` target (see README.md).
+fn build_zomes() {
+    static BUILT: Mutex<bool> = Mutex::new(false);
     let mut built = BUILT.lock().unwrap();
-    if let Some(p) = &*built {
-        return p.clone();
+    if *built {
+        return;
     }
-    let dna_dir = repo_root().join("dna");
     let status = std::process::Command::new(env!("CARGO"))
         .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
-        .current_dir(&dna_dir)
+        .current_dir(repo_root().join("dna"))
         .env_remove("RUSTFLAGS")
         .status()
         .expect("run cargo to build the zomes");
     assert!(status.success(), "building the zomes to wasm failed");
+    *built = true;
+}
+
+/// Pack `dna/workdir/<dir>` (once per process) and return `<dir>/<file>`.
+/// Needs the `hc` CLI on PATH.
+fn pack(dir: &str, file: &str) -> PathBuf {
+    static PACKED: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
+    build_zomes();
+    let mut packed = PACKED.lock().unwrap();
+    if let Some((_, p)) = packed.iter().find(|(d, _)| d == dir) {
+        return p.clone();
+    }
+    let dna_dir = repo_root().join("dna");
     let status = std::process::Command::new("hc")
-        .args(["dna", "pack", "workdir"])
+        .args(["dna", "pack", &format!("workdir/{dir}")])
         .current_dir(&dna_dir)
         .status()
         .expect("run `hc dna pack` (is the holochain CLI installed?)");
-    assert!(status.success(), "`hc dna pack` failed");
+    assert!(status.success(), "`hc dna pack workdir/{dir}` failed");
     let path = dna_dir
-        .join("workdir/moq_directory.dna")
+        .join(format!("workdir/{dir}/{file}"))
         .canonicalize()
         .unwrap();
-    *built = Some(path.clone());
+    packed.push((dir.to_string(), path.clone()));
     path
 }
 
-/// The TEST-ONLY DNA: production integrity + coordinator, plus the `forge`
-/// coordinator (`dna/forge`) that commits records unchecked. Same integrity
-/// zome, so validation is exactly production's.
+/// The gaming directory DNA (`dna/workdir/gaming_directory`): the platform's
+/// peers, presence, streams, sessions and game registry.
+pub fn dna_bundle() -> PathBuf {
+    pack("gaming_directory", "gaming_directory.dna")
+}
+
+/// TEST-ONLY gaming directory DNA: production integrity + coordinator plus a
+/// `forge` coordinator that commits records unchecked (same DNA hash).
 pub fn forge_dna_bundle() -> PathBuf {
-    static BUILT: Mutex<Option<PathBuf>> = Mutex::new(None);
-    let mut built = BUILT.lock().unwrap();
-    if let Some(p) = &*built {
-        return p.clone();
-    }
-    dna_bundle(); // builds every zome, forge included
-    let dna_dir = repo_root().join("dna");
-    let status = std::process::Command::new("hc")
-        .args(["dna", "pack", "workdir/forge"])
-        .current_dir(&dna_dir)
-        .status()
-        .expect("run `hc dna pack`");
-    assert!(status.success(), "`hc dna pack workdir/forge` failed");
-    let path = dna_dir
-        .join("workdir/forge/moq_directory.dna")
-        .canonicalize()
-        .unwrap();
-    *built = Some(path.clone());
-    path
+    pack("gaming_directory/forge", "gaming_directory.dna")
+}
+
+/// The Turbo Kart DNA (`dna/workdir/turbo_kart`).
+pub fn kart_dna_bundle() -> PathBuf {
+    pack("turbo_kart", "turbo_kart.dna")
+}
+
+/// TEST-ONLY Turbo Kart DNA with its `forge` coordinator (same DNA hash).
+pub fn kart_forge_dna_bundle() -> PathBuf {
+    pack("turbo_kart/forge", "turbo_kart.dna")
 }
 
 pub struct Network {
     pub conductors: SweetConductorBatch,
+    /// Gaming directory cells, one per conductor.
     pub cells: Vec<SweetCell>,
+    /// Turbo Kart cells (same agents), if the game app is installed.
+    pub kart_cells: Vec<SweetCell>,
 }
 
 impl Network {
@@ -111,42 +127,65 @@ impl Network {
     pub fn zome(&self, i: usize) -> SweetZome {
         self.cells[i].zome(ZOME)
     }
-    /// Wait until every conductor has integrated every op.
+    pub fn kart_zome(&self, i: usize) -> SweetZome {
+        self.kart_cells[i].zome(KART_ZOME)
+    }
+    /// Wait until every conductor has integrated every op, per DNA (the
+    /// directory and the game are separate networks).
     pub async fn settle(&self) {
         await_consistency_s(60, self.cells.iter()).await.unwrap();
+        if !self.kart_cells.is_empty() {
+            await_consistency_s(60, self.kart_cells.iter())
+                .await
+                .unwrap();
+        }
     }
     /// sweettest names the app role after the DNA hash; a real hApp install
-    /// uses `happ.yaml`'s role (`moq_directory`, the bridge default).
+    /// uses `happ.yaml`'s role (`gaming_directory`, the bridge default).
     pub fn config(&self, i: usize, admin_port: u16) -> ConductorConfig {
         let mut c = ConductorConfig::new(SocketAddr::from(([127, 0, 0, 1], admin_port)), APP_ID);
         c.role_name = self.cells[i].cell_id().dna_hash().to_string();
         c
     }
+    /// The Turbo Kart app's connection settings (its own app id, role, zome).
+    pub fn kart_config(&self, i: usize, admin_port: u16) -> ConductorConfig {
+        let mut c =
+            ConductorConfig::new(SocketAddr::from(([127, 0, 0, 1], admin_port)), KART_APP_ID);
+        c.role_name = self.kart_cells[i].cell_id().dna_hash().to_string();
+        c.zome_name = KART_ZOME.to_string();
+        c
+    }
+    pub fn admin_port(&self, i: usize) -> u16 {
+        self.conductors[i]
+            .get_arbitrary_admin_websocket_port()
+            .expect("admin port")
+    }
     /// A `PeerDirectory` for conductor `i`, connected the way production
     /// code connects: over the conductor's admin + app websockets.
     pub async fn directory(&self, i: usize) -> HolochainPeerDirectory {
-        let admin_port = self.conductors[i]
-            .get_arbitrary_admin_websocket_port()
-            .expect("admin port");
-        HolochainPeerDirectory::connect(self.config(i, admin_port))
+        HolochainPeerDirectory::connect(self.config(i, self.admin_port(i)))
             .await
             .expect("connect HolochainPeerDirectory")
     }
 }
 
-/// `n` separate conductors, each with its own agent, all running the same
-/// DNA, gossiping with each other.
+/// `n` separate conductors, each with its own agent, all running the gaming
+/// directory DNA, gossiping with each other.
 pub async fn network(n: usize) -> Network {
     network_with(n, &dna_bundle()).await
 }
 
-/// `n` conductors running the DNA bundle at `bundle`.
-pub async fn network_with(n: usize, bundle: &Path) -> Network {
+fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .try_init();
+}
+
+/// `n` conductors running the DNA bundle at `bundle`.
+pub async fn network_with(n: usize, bundle: &Path) -> Network {
+    init_tracing();
     let dna = SweetDnaFile::from_bundle(bundle).await.unwrap();
     let mut conductors = SweetConductorBatch::standard(n).await;
     let apps = conductors.setup_app(APP_ID, &[dna]).await.unwrap();
@@ -156,7 +195,51 @@ pub async fn network_with(n: usize, bundle: &Path) -> Network {
         .map(|app| app.into_cells().into_iter().next().unwrap())
         .collect();
     conductors.exchange_peer_info().await;
-    Network { conductors, cells }
+    Network {
+        conductors,
+        cells,
+        kart_cells: Vec::new(),
+    }
+}
+
+/// `n` conductors with the platform app (gaming directory at `directory`)
+/// and, under the same agent on each, the Turbo Kart app (`kart`): the
+/// production composition of two separate apps sharing one agent key.
+pub async fn platform_and_kart(n: usize, directory: &Path, kart: &Path) -> Network {
+    init_tracing();
+    let dir_dna = SweetDnaFile::from_bundle(directory).await.unwrap();
+    let kart_dna = SweetDnaFile::from_bundle(kart).await.unwrap();
+    let mut conductors = SweetConductorBatch::standard(n).await;
+    let apps = conductors.setup_app(APP_ID, &[dir_dna]).await.unwrap();
+    let cells: Vec<SweetCell> = apps
+        .into_inner()
+        .into_iter()
+        .map(|app| app.into_cells().into_iter().next().unwrap())
+        .collect();
+    let mut kart_cells = Vec::new();
+    for (i, cell) in cells.iter().enumerate() {
+        let app = conductors[i]
+            .setup_app_for_agent(
+                KART_APP_ID,
+                cell.agent_pubkey().clone(),
+                &[kart_dna.clone()],
+            )
+            .await
+            .unwrap();
+        let kc = app.into_cells().into_iter().next().unwrap();
+        assert_eq!(
+            kc.agent_pubkey(),
+            cell.agent_pubkey(),
+            "one agent across both apps"
+        );
+        kart_cells.push(kc);
+    }
+    conductors.exchange_peer_info().await;
+    Network {
+        conductors,
+        cells,
+        kart_cells,
+    }
 }
 
 pub fn endpoint(addr: SocketAddr, identity: TransportIdentity) -> Endpoint {

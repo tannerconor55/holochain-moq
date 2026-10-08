@@ -125,8 +125,10 @@ fn codecs_stay_out_of_realtime_and_the_control_plane() {
         "crates/protocol/Cargo.toml",
         "crates/node/Cargo.toml",
         "crates/hdk-bridge/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let manifest = fs::read_to_string(root().join(rel)).unwrap();
         for codec in [
@@ -325,8 +327,10 @@ fn the_audio_boundary_is_independent() {
         "crates/protocol/Cargo.toml",
         "crates/node/Cargo.toml",
         "crates/hdk-bridge/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -398,8 +402,10 @@ fn the_opus_codec_depends_only_on_audio() {
         "crates/video/Cargo.toml",
         "crates/camera-v4l/Cargo.toml",
         "crates/codec-av1/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -488,8 +494,10 @@ fn the_audio_transport_crate_joins_audio_codec_and_realtime_only() {
         "crates/hdk-bridge/Cargo.toml",
         "crates/video/Cargo.toml",
         "crates/codec-av1/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -644,8 +652,10 @@ fn the_media_timeline_is_independent_of_holochain_transport_and_codecs() {
         "crates/protocol/Cargo.toml",
         "crates/node/Cargo.toml",
         "crates/hdk-bridge/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -703,8 +713,10 @@ fn the_microphone_backend_knows_only_audio() {
         "crates/realtime/Cargo.toml",
         "crates/protocol/Cargo.toml",
         "crates/media-timeline/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -768,8 +780,10 @@ fn the_av_session_only_composes_the_existing_pipelines() {
         "crates/protocol/Cargo.toml",
         "crates/node/Cargo.toml",
         "crates/hdk-bridge/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -836,8 +850,10 @@ fn the_av_subscriber_composes_decoders_without_holochain_or_sync() {
         "crates/hdk-bridge/Cargo.toml",
         "crates/av-session/Cargo.toml",
         "crates/media-timeline/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -910,8 +926,10 @@ fn the_av_reconnect_layer_only_composes_the_reconnect_controller_and_the_decoder
         "crates/av-subscribe/Cargo.toml",
         "crates/av-session/Cargo.toml",
         "crates/media-timeline/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -1035,8 +1053,10 @@ fn playback_consumes_only_decoded_media_and_timeline_positions() {
         "crates/av-subscribe/Cargo.toml",
         "crates/av-session/Cargo.toml",
         "crates/media-timeline/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -1109,8 +1129,10 @@ fn av_sync_is_pure_timeline_arithmetic_over_the_playback_boundary() {
         "crates/av-session/Cargo.toml",
         "crates/media-timeline/Cargo.toml",
         "crates/playback/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -1297,8 +1319,10 @@ fn video_adaptation_is_a_policy_layer_over_the_encoder_and_statistics_only() {
         "crates/av-sync/Cargo.toml",
         "crates/camera-v4l/Cargo.toml",
         "crates/mic-alsa/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -1405,8 +1429,10 @@ fn audio_adaptation_is_a_policy_layer_over_the_opus_control_and_statistics_only(
         "crates/av-sync/Cargo.toml",
         "crates/camera-v4l/Cargo.toml",
         "crates/mic-alsa/Cargo.toml",
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "dna/turbo_kart/integrity/Cargo.toml",
+        "dna/turbo_kart/coordinator/Cargo.toml",
     ] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
@@ -1512,7 +1538,8 @@ fn the_screen_backend_is_a_plain_source_and_sink_and_the_transport_knows_no_scre
         }
     }
     // The app adds no media payload to the DNA.
-    assert!(!deps("dna/coordinator/Cargo.toml").contains("screen"));
+    assert!(!deps("dna/gaming_directory/coordinator/Cargo.toml").contains("screen"));
+    assert!(!deps("dna/turbo_kart/coordinator/Cargo.toml").contains("screen"));
 }
 
 /// The application session (Stage 14B) is control-plane metadata: it lives in the
@@ -1618,7 +1645,7 @@ fn the_lobby_control_plane_and_the_realtime_game_path_stay_apart() {
             }
         }
     }
-    for rel in ["dna", "crates/protocol/src/lobby.rs"] {
+    for rel in ["dna", "crates/turbo-kart/src"] {
         let files = if rel.ends_with(".rs") {
             vec![(
                 root().join(rel),
@@ -1689,31 +1716,30 @@ fn the_generic_realtime_layers_know_no_specific_game() {
     );
 }
 
-/// The shared/platform types and the Turbo Kart types stay apart inside
-/// `crates/protocol`: the game registry is game-neutral, and Turbo Kart's
-/// rules (roster, tracks, classes, lap floors) live only in its own module.
+/// Gaming platform split: platform types and Turbo Kart types stay apart.
+/// The registry is game-neutral; `crates/protocol` (shared by every DNA) holds
+/// no Turbo Kart rule at all; Turbo Kart's rules live in `crates/turbo-kart`.
 #[test]
 fn platform_types_and_turbo_kart_types_stay_apart() {
     let game = code(&fs::read_to_string(root().join("crates/platform/src/lib.rs")).unwrap());
     for w in ["lobby", "Lobby", "RaceResult", "CHARACTER_IDS", "TRACKS"] {
         assert!(!has_word(&game, w), "crates/platform mentions `{w}`");
     }
-    // The registry must not ride into the current DNA (it would change its hash).
-    for rel in [
-        "dna/integrity/Cargo.toml",
-        "dna/coordinator/Cargo.toml",
-        "crates/protocol/Cargo.toml",
-    ] {
+    // Neither the shared protocol crate nor the registry may depend on a game.
+    for rel in ["crates/protocol/Cargo.toml", "crates/platform/Cargo.toml"] {
         let m = fs::read_to_string(root().join(rel)).unwrap();
         assert!(
-            !m.contains("holochain-moq-platform"),
-            "{rel} depends on crates/platform"
+            !m.contains("turbo-kart"),
+            "{rel} depends on a Turbo Kart crate"
         );
     }
+    assert!(
+        !fs::read_to_string(root().join("crates/protocol/Cargo.toml"))
+            .unwrap()
+            .contains("holochain-moq-platform"),
+        "crates/protocol depends on crates/platform"
+    );
     for (path, src) in sources("crates/protocol/src") {
-        if path.ends_with("lobby.rs") {
-            continue;
-        }
         let src = code(&src);
         for w in [
             "CHARACTER_IDS",
@@ -1721,6 +1747,8 @@ fn platform_types_and_turbo_kart_types_stay_apart() {
             "MIN_LAP_MS",
             "palm-cove",
             "150cc",
+            "Lobby",
+            "RaceResult",
         ] {
             assert!(
                 !src.contains(w),
@@ -1729,4 +1757,81 @@ fn platform_types_and_turbo_kart_types_stay_apart() {
             );
         }
     }
+}
+
+/// Gaming platform split, DNA level: the gaming directory holds only
+/// platform-wide records (no lobby, race or result; no Turbo Kart crate), and
+/// the Turbo Kart DNA holds no competing identity, endpoint or presence
+/// records (it uses the platform's agent key). The bridge stays game-neutral.
+#[test]
+fn the_platform_dna_and_the_game_dna_hold_only_their_own_records() {
+    for rel in [
+        "dna/gaming_directory/integrity/Cargo.toml",
+        "dna/gaming_directory/coordinator/Cargo.toml",
+        "crates/hdk-bridge/Cargo.toml",
+        "crates/node/Cargo.toml",
+    ] {
+        let m = fs::read_to_string(root().join(rel)).unwrap();
+        assert!(
+            !m.contains("turbo-kart") && !m.contains("turbo_kart"),
+            "{rel} depends on Turbo Kart"
+        );
+    }
+    for rel in [
+        "dna/gaming_directory",
+        "crates/hdk-bridge/src",
+        "crates/node/src",
+    ] {
+        for (path, src) in sources(rel) {
+            let src = code(&src);
+            for w in [
+                "Lobby",
+                "LobbyEntry",
+                "LobbyJoin",
+                "LobbyStatus",
+                "RaceResult",
+                "LeaderboardBand",
+                "CHARACTER_IDS",
+                "turbo_kart",
+            ] {
+                assert!(!has_word(&src, w), "{} mentions `{w}`", path.display());
+            }
+        }
+    }
+    for (path, src) in sources("dna/turbo_kart") {
+        let src = code(&src);
+        for w in [
+            "PeerEndpointEntry",
+            "PeerEndpoint",
+            "EndpointAdvertisement",
+            "AgentToEndpoint",
+            "AgentToPeer",
+            "TransportIdentity",
+            "GameEntry",
+            "moq_directory_integrity",
+        ] {
+            assert!(!has_word(&src, w), "{} mentions `{w}`", path.display());
+        }
+    }
+    // The game DNA's manifests carry only its own zomes, never the directory.
+    for rel in [
+        "dna/workdir/turbo_kart/dna.yaml",
+        "dna/workdir/turbo_kart/happ.yaml",
+    ] {
+        let m = code(
+            &fs::read_to_string(root().join(rel))
+                .unwrap()
+                .replace('#', "//"),
+        );
+        assert!(
+            !m.contains("moq_directory") && !m.contains("gaming_directory.dna"),
+            "{rel}"
+        );
+    }
+    let platform =
+        fs::read_to_string(root().join("dna/workdir/gaming_directory/dna.yaml")).unwrap();
+    assert!(
+        !platform.contains("turbo_kart"),
+        "the platform DNA manifest names a game zome"
+    );
 }

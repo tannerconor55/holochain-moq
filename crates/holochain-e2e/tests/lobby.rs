@@ -27,11 +27,12 @@ use holochain_moq_host::{HostConfig, HostEvent, HostSession, HostSetup};
 use holochain_moq_mesh::{DeliveryMode, MeshConfig, MeshSession, PeerBinding, RaceId, TrackName};
 use holochain_moq_mesh_iroh::{iroh_addr_for, iroh_endpoint, IrohConfig, IrohMeshTransport, Reach};
 use holochain_moq_node::DirectoryError;
-use holochain_moq_protocol::lobby::{
-    CreateLobbyInput, JoinLobbyInput, LeaderboardEntry, LeaderboardInput, LobbyId, LobbyState,
-    LobbyStatus, LobbySummary, LobbyView, RaceResult, PRESENCE_TTL_MS,
+use holochain_moq_protocol::{Endpoint, PRESENCE_TTL_MS};
+use holochain_moq_turbo_kart::{
+    CreateLobbyInput, JoinLobbyInput, LeaderboardEntry, LeaderboardInput, LobbyId, LobbySnapshot,
+    LobbyState, LobbyStatus, LobbySummary, LobbyView, RaceResult,
 };
-use holochain_moq_protocol::Endpoint;
+use holochain_moq_turbo_kart_client::{KartError, TurboKartClient};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ const ALICE: usize = 0;
 const BOB: usize = 1;
 const CAROL: usize = 2;
 
-/// Counts every zome call a directory makes: the Holochain-call meter.
+/// Counts every zome call (to either app): the Holochain-call meter.
 struct CountingCaller {
     inner: Arc<dyn ZomeCaller>,
     calls: Arc<AtomicUsize>,
@@ -57,19 +58,36 @@ impl ZomeCaller for CountingCaller {
     }
 }
 
-async fn counting_directory(net: &Network, i: usize) -> (HolochainPeerDirectory, Arc<AtomicUsize>) {
-    let port = net.conductors[i]
-        .get_arbitrary_admin_websocket_port()
-        .expect("admin port");
-    let inner = HolochainPeerDirectory::connect_zome_caller(net.config(i, port))
-        .await
-        .expect("connect");
+/// Agent `i`'s Turbo Kart client - the game app plus the same agent's gaming
+/// directory - with one counter over every zome call to both apps.
+async fn counting_client(net: &Network, i: usize) -> (TurboKartClient, Arc<AtomicUsize>) {
+    let port = net.admin_port(i);
     let calls = Arc::new(AtomicUsize::new(0));
-    let dir = HolochainPeerDirectory::with_caller(Arc::new(CountingCaller {
-        inner,
-        calls: calls.clone(),
-    }));
-    (dir, calls)
+    let counted = |inner| -> Arc<dyn ZomeCaller> {
+        Arc::new(CountingCaller {
+            inner,
+            calls: calls.clone(),
+        })
+    };
+    let dir_caller = HolochainPeerDirectory::connect_zome_caller(net.config(i, port))
+        .await
+        .expect("connect directory");
+    let kart_caller = HolochainPeerDirectory::connect_zome_caller(net.kart_config(i, port))
+        .await
+        .expect("connect turbo kart");
+    let dir = HolochainPeerDirectory::with_caller(counted(dir_caller));
+    (TurboKartClient::new(counted(kart_caller), dir), calls)
+}
+
+/// Agent `i`'s Turbo Kart client over the real app websockets.
+async fn kart_client(
+    net: &Network,
+    i: usize,
+    directory: HolochainPeerDirectory,
+) -> TurboKartClient {
+    TurboKartClient::connect_as_configured(net.kart_config(i, net.admin_port(i)), directory)
+        .await
+        .expect("connect TurboKartClient")
 }
 
 /// Poll `f` every 50 ms until it yields `Some`, up to 60 s; returns it and
@@ -106,7 +124,6 @@ fn create(name: &str, max_players: u8, character: &str) -> CreateLobbyInput {
         relay_urls: vec!["https://relay.example/".into()],
         character_id: character.into(),
         invite_code: None,
-        endpoint: None,
     }
 }
 
@@ -115,7 +132,6 @@ fn join(lobby: &str, character: &str) -> JoinLobbyInput {
         lobby: lobby.into(),
         character_id: character.into(),
         invite_code: None,
-        endpoint: None,
     }
 }
 
@@ -148,26 +164,30 @@ fn roster(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochain_calls() {
-    let net = network(2).await;
+    let net = platform_and_kart(2, &dna_bundle(), &kart_dna_bundle()).await;
     let (alice, bob) = (net.agent_b64(ALICE), net.agent_b64(BOB));
-    let (adir, acalls) = counting_directory(&net, ALICE).await;
-    let (bdir, bcalls) = counting_directory(&net, BOB).await;
+    let (adir, acalls) = counting_client(&net, ALICE).await;
+    let (bdir, bcalls) = counting_client(&net, BOB).await;
 
     // Each app binds its iroh endpoint and advertises it with the lobby call.
     let (at, arec) = bind_iroh(&alice).await;
     let (bt, brec) = bind_iroh(&bob).await;
     let a_ad = adir
+        .directory()
         .presence(arec.clone(), unix_now_ms(), PRESENCE_TTL_MS)
         .unwrap();
     let b_ad = bdir
+        .directory()
         .presence(brec.clone(), unix_now_ms(), PRESENCE_TTL_MS)
         .unwrap();
 
     // Alice creates a public lobby.
-    let mut input = create("Saturday cup", 4, "blaze");
-    input.endpoint = Some(a_ad);
+    let input = create("Saturday cup", 4, "blaze");
     let t0 = Instant::now();
-    let lid = adir.create_lobby(input).await.expect("create_lobby");
+    let lid = adir
+        .create_lobby(input, Some(a_ad))
+        .await
+        .expect("create_lobby");
     let create_ms = ms(t0.elapsed());
 
     // Bob discovers it (propagation across conductors, by polling).
@@ -183,10 +203,9 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     assert_eq!(summary.lobby.name, "Saturday cup");
 
     // Bob joins with a valid character and his endpoint.
-    let mut j = join(&lid, "toadly");
-    j.endpoint = Some(b_ad);
+    let j = join(&lid, "toadly");
     let t0 = Instant::now();
-    bdir.join_lobby(j).await.expect("join_lobby");
+    bdir.join_lobby(j, Some(b_ad)).await.expect("join_lobby");
     let join_ms = ms(t0.elapsed());
 
     // Alice observes Bob as a member, with a fresh endpoint.
@@ -214,11 +233,12 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     assert_eq!(view.live_iroh_endpoints(&alice, now), vec![arec.clone()]);
     assert_eq!(view.live_iroh_endpoints(&bob, now), vec![brec.clone()]);
 
-    // Bob's join is an action on Bob's own source chain, i.e. authored by Bob
+    // Bob's join is an action on Bob's own Turbo Kart source chain (same agent
+    // key as his directory cell), i.e. authored by Bob
     // (validation also binds `LobbyJoin.player` to that author).
     let bob_join = ActionHash::try_from(view.members[1].member.join.as_str()).unwrap();
     let chain = net.conductors[BOB]
-        .get_agent_source_chain(&net.agent(BOB), net.cells[BOB].cell_id().dna_hash())
+        .get_agent_source_chain(&net.agent(BOB), net.kart_cells[BOB].cell_id().dna_hash())
         .await;
     let mine = chain
         .query(holochain::prelude::ChainQueryFilter::new())
@@ -461,20 +481,20 @@ where
     O: serde::de::DeserializeOwned + std::fmt::Debug,
 {
     net.conductors[i]
-        .call_fallible(&net.zome(i), f, input)
+        .call_fallible(&net.kart_zome(i), f, input)
         .await
         .map_err(|e| e.to_string())
 }
 
-async fn lobby(net: &Network, i: usize, id: &LobbyId) -> LobbyView {
-    zcall::<_, Option<LobbyView>>(net, i, "get_lobby", id.clone())
+async fn lobby(net: &Network, i: usize, id: &LobbyId) -> LobbySnapshot {
+    zcall::<_, Option<LobbySnapshot>>(net, i, "get_lobby", id.clone())
         .await
         .unwrap()
         .expect("lobby exists")
 }
 
-fn players(v: &LobbyView) -> Vec<String> {
-    v.members.iter().map(|m| m.member.player.clone()).collect()
+fn players(v: &LobbySnapshot) -> Vec<String> {
+    v.members.iter().map(|m| m.player.clone()).collect()
 }
 
 fn result(lid: &str, race: &str, player: &str, lap: Option<u32>) -> RaceResult {
@@ -491,7 +511,7 @@ fn result(lid: &str, race: &str, player: &str, lap: Option<u32>) -> RaceResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lobby_lifecycle_capacity_status_authority_results_and_leaderboard() {
-    let net = network(3).await;
+    let net = platform_and_kart(3, &dna_bundle(), &kart_dna_bundle()).await;
     let (alice, bob, carol) = (
         net.agent_b64(ALICE),
         net.agent_b64(BOB),
@@ -711,47 +731,51 @@ async fn lobby_lifecycle_capacity_status_authority_results_and_leaderboard() {
     .await
     .expect_err("unknown track");
 
-    // Bridge-side checks fail before any call.
-    let dir = net.directory(BOB).await;
-    let err = dir
+    // Client-side checks fail before any call.
+    let client = kart_client(&net, BOB, net.directory(BOB).await).await;
+    let err = client
         .publish_result(result(&lid, "duel-1", &alice, Some(50_000)))
         .await
         .unwrap_err();
     assert!(
-        matches!(err, DirectoryError::ResultAuthorMismatch { .. }),
+        matches!(err, KartError::ResultAuthorMismatch { .. }),
         "{err:?}"
     );
     let mut bad = create("x", 9, "blaze");
     bad.max_players = 9;
     assert!(matches!(
-        dir.create_lobby(bad).await.unwrap_err(),
-        DirectoryError::InvalidLobbyRecord(_)
+        client.create_lobby(bad, None).await.unwrap_err(),
+        KartError::InvalidRecord(_)
     ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
-    let net = network(2).await;
+    let net = platform_and_kart(2, &dna_bundle(), &kart_dna_bundle()).await;
     let (alice, bob) = (net.agent_b64(ALICE), net.agent_b64(BOB));
     let adir = net.directory(ALICE).await;
     let bdir = net.directory(BOB).await;
+    let akart = kart_client(&net, ALICE, adir.clone()).await;
+    let bkart = kart_client(&net, BOB, bdir.clone()).await;
     let (at, arec) = bind_iroh(&alice).await;
     let (_bt, brec) = bind_iroh(&bob).await;
 
     // Initial publish with the lobby; Bob joins with his own.
     let t0 = unix_now_ms();
-    let mut input = create("Presence", 4, "blaze");
-    input.endpoint = Some(adir.presence(arec.clone(), t0, 3_000).unwrap());
-    let lid = adir.create_lobby(input).await.unwrap();
+    let input = create("Presence", 4, "blaze");
+    let a_ad = adir.presence(arec.clone(), t0, 3_000).unwrap();
+    let lid = akart.create_lobby(input, Some(a_ad)).await.unwrap();
     net.settle().await;
-    let mut j = join(&lid, "rex");
-    j.endpoint = Some(bdir.presence(brec.clone(), t0, PRESENCE_TTL_MS).unwrap());
-    bdir.join_lobby(j).await.unwrap();
+    let b_ad = bdir.presence(brec.clone(), t0, PRESENCE_TTL_MS).unwrap();
+    bkart
+        .join_lobby(join(&lid, "rex"), Some(b_ad))
+        .await
+        .unwrap();
     net.settle().await;
 
     // (1)-(3): A advertises EndpointId A; Bob's directory resolves A -> A, and
     // a mesh roster built from it binds A to exactly that key.
-    let v = bdir.get_lobby(&lid).await.unwrap().unwrap();
+    let v = bkart.get_lobby(&lid).await.unwrap().unwrap();
     let live = v.live_iroh_endpoints(&alice, t0 + 1);
     assert_eq!(live, vec![arec.clone()]);
     let addr = iroh_addr_for(&live).unwrap();
@@ -773,9 +797,12 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     tokio::time::sleep(Duration::from_millis(3_500)).await;
     drop(refresher);
     net.settle().await;
-    let now = unix_now_ms();
-    let v = bdir.get_lobby(&lid).await.unwrap().unwrap();
-    let live = v.live_iroh_endpoints(&alice, now);
+    let v = bkart.get_lobby(&lid).await.unwrap().unwrap();
+    // Judged at a fixed instant just past the first advertisement's expiry
+    // (t0 + 3 s), not at "now": consistency across both DNAs can take longer
+    // than the 3 s validity of the last refresh.
+    let past_first_expiry = t0 + 3_001;
+    let live = v.live_iroh_endpoints(&alice, past_first_expiry);
     assert!(
         !live.is_empty(),
         "refreshed presence is live after the first one expired"
@@ -794,6 +821,10 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     assert!(ads
         .windows(2)
         .all(|w| w[0].published_at >= w[1].published_at));
+    assert!(
+        ads[0].published_at > t0 + 3_000,
+        "the refresher kept publishing past the first expiry"
+    );
     // Without further refresh it lapses again.
     let last = ads.iter().map(|a| a.expires_at.unwrap()).max().unwrap();
     assert!(v.live_iroh_endpoints(&alice, last + 1).is_empty());
@@ -824,7 +855,7 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     // mesh refuses a peer bound to her own key.
     bdir.publish_presence(arec.clone()).await.unwrap();
     net.settle().await;
-    let v = adir.get_lobby(&lid).await.unwrap().unwrap();
+    let v = akart.get_lobby(&lid).await.unwrap().unwrap();
     let now = unix_now_ms();
     let bob_eps = v.live_iroh_endpoints(&bob, now);
     assert!(bob_eps.contains(&arec) && bob_eps.contains(&brec));

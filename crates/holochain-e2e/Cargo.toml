@@ -40,3 +40,7 @@ holochain-moq-mesh = { workspace = true }
 holochain-moq-mesh-iroh = { workspace = true }
 holochain-moq-host = { path = "../host" }
 holochain-moq-clock = { path = "../clock" }
+# Gaming platform split: registry types, Turbo Kart records and its client.
+holochain-moq-platform = { path = "../platform" }
+holochain-moq-turbo-kart = { path = "../turbo-kart" }
+holochain-moq-turbo-kart-client = { path = "../turbo-kart-client" }
