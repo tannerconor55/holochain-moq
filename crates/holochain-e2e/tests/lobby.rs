@@ -24,7 +24,9 @@ use holochain_moq_hdk_bridge::{
     unix_now_ms, HolochainPeerDirectory, PresenceRefresher, ZomeCaller,
 };
 use holochain_moq_host::{HostConfig, HostEvent, HostSession, HostSetup};
-use holochain_moq_mesh::{DeliveryMode, MeshConfig, MeshSession, PeerBinding, RaceId, TrackName};
+use holochain_moq_mesh::{
+    DeliveryMode, MeshConfig, MeshSession, MeshTransport, PeerBinding, RaceId, Role, TrackName,
+};
 use holochain_moq_mesh_iroh::{
     iroh_addr_for, iroh_endpoint, IrohConfig, IrohMeshTransport, Reach, SecretKey,
 };
@@ -32,9 +34,9 @@ use holochain_moq_node::DirectoryError;
 use holochain_moq_protocol::{iroh_binding_payload, BindingSignature, Endpoint, PRESENCE_TTL_MS};
 use holochain_moq_turbo_kart::{
     CreateLobbyInput, JoinLobbyInput, LeaderboardEntry, LeaderboardInput, LobbyId, LobbySnapshot,
-    LobbyState, LobbyStatus, LobbySummary, LobbyView, RaceResult,
+    LobbyState, LobbyStatus, LobbySummary, RaceResult,
 };
-use holochain_moq_turbo_kart_client::{KartError, TurboKartClient};
+use holochain_moq_turbo_kart_client::{KartError, RaceAdmission, TurboKartClient};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -153,25 +155,6 @@ async fn bind_iroh(agent: &str) -> (IrohMeshTransport, Endpoint, BindingSignatur
     (t, rec, binding)
 }
 
-/// The race-setup roster from a lobby snapshot: every other member's live
-/// iroh endpoints, merged and identity-checked by `iroh_addr_for`.
-fn roster(
-    view: &LobbyView,
-    me: &str,
-    now: i64,
-) -> anyhow::Result<Vec<PeerBinding<holochain_moq_mesh_iroh::EndpointAddr>>> {
-    view.members
-        .iter()
-        .filter(|m| m.member.player != me)
-        .map(|m| {
-            Ok(PeerBinding {
-                agent: m.member.player.clone(),
-                addr: iroh_addr_for(&view.live_iroh_endpoints(&m.member.player, now))?,
-            })
-        })
-        .collect()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochain_calls() {
     let net = platform_and_kart(2, &dna_bundle(), &kart_dna_bundle()).await;
@@ -276,31 +259,27 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     })
     .await;
     let aview = adir.get_lobby(&lid).await.unwrap().unwrap();
-    let race_id = RaceId::new(
-        bview
-            .status
-            .as_ref()
-            .unwrap()
-            .status
-            .race_id
-            .clone()
-            .unwrap(),
-    )
-    .unwrap();
+    // WP8: each side snapshots race authorization from what it read - the
+    // admitted members and their verified EndpointIds - and the mesh admits
+    // exactly that roster for the whole race.
     let now = unix_now_ms();
+    let a_adm = RaceAdmission::from_view(&aview, &alice, now).expect("Alice admitted");
+    let b_adm = RaceAdmission::from_view(&bview, &bob, now).expect("Bob admitted");
+    assert_eq!(a_adm.race_id, b_adm.race_id);
+    assert_eq!(a_adm.agents(), b_adm.agents());
     let (am, _) = MeshSession::start(
         at,
         alice.clone(),
-        race_id.clone(),
-        roster(&aview, &alice, now).unwrap(),
+        a_adm.race_id.clone(),
+        a_adm.roster(|m| iroh_addr_for(&m.endpoints)).unwrap(),
         MeshConfig::default(),
     )
     .unwrap();
     let (bm, _) = MeshSession::start(
         bt,
         bob.clone(),
-        race_id,
-        roster(&bview, &bob, now).unwrap(),
+        b_adm.race_id.clone(),
+        b_adm.roster(|m| iroh_addr_for(&m.endpoints)).unwrap(),
         MeshConfig::default(),
     )
     .unwrap();
@@ -310,12 +289,14 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
         "mesh from DHT endpoints"
     );
     assert!(bm.wait_for_peers(1, Duration::from_secs(20)).await);
-    let members = vec![alice.clone(), bob.clone()];
     let setup = HostSetup {
-        creator: aview.host().clone(),
-        members: members.clone(),
-        ai_slots: vec![0],
+        creator: a_adm.host.clone(),
+        members: a_adm.agents(),
+        ai_slots: a_adm.ai_slots(1).unwrap(),
     };
+    // An authenticated iroh endpoint that is not in the race (bound before
+    // the window: binding is not a Holochain call either).
+    let (outsider, _, _) = bind_iroh("uhCAk-outsider").await;
     let cfg = HostConfig {
         heartbeat_interval: Duration::from_millis(100),
         failure_timeout: Duration::from_secs(1),
@@ -382,6 +363,22 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     }
     assert!(ai_frames > 0, "Bob received AI frames from host Alice");
 
+    // WP8: a non-member's connection is refused from the cached roster before
+    // any session or track exists - no Holochain lookup.
+    let link = outsider
+        .dial(&am.transport().addr(Duration::ZERO).await)
+        .await
+        .unwrap();
+    let probe = link.clone();
+    let _ = outsider.establish(link, Role::Dialer, &alice).await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), probe.closed())
+        .await
+        .unwrap();
+    assert!(
+        format!("{closed:?} {closed}").contains("19713"),
+        "refused as NotMember: {closed:?}"
+    );
+
     // WP6: a forced transport loss mid-race. The mesh reconnects on its own,
     // re-authenticating the same EndpointIds from the roster it already has;
     // reliable events resume with no gap. Still no Holochain call.
@@ -431,7 +428,7 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
             bcalls.load(Ordering::SeqCst) - b0
         ),
         (0, 0),
-        "zero Holochain calls during kart state, events, AI, heartbeats, a forced reconnect, election and migration"
+        "zero Holochain calls during kart state, events, AI, heartbeats, a refused non-member, a forced reconnect, election and migration"
     );
     let window_ms = ms(window.elapsed());
 
