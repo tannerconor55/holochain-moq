@@ -16,12 +16,13 @@
 //! (from the control plane): iroh's own address lookup (n0 DNS/pkarr) and the
 //! default n0 relays are never configured.
 
+pub mod limits;
 pub mod record;
 mod session;
 mod track;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -31,6 +32,10 @@ use iroh::endpoint::{presets, Connection, QuicTransportConfig, VarInt};
 use moq_net::{broadcast, origin, Version, Versions};
 
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
+pub use limits::{
+    LimitStats, CONNECTION_RECEIVE_WINDOW, MAX_EARLY_TRACKS, MAX_PEER_SUBSCRIPTIONS,
+    RESOURCE_LIMIT_CODE, SUBSCRIBE_CACHE_BYTES,
+};
 pub use record::{iroh_addr, iroh_addr_for, iroh_endpoint};
 pub use session::{IrohMoqSession, ABORT_CODE, LEAVE_CODE};
 pub use track::{
@@ -107,11 +112,15 @@ pub struct IrohMeshTransport {
     latest_carrier: LatestCarrier,
     reliable_max_age: Duration,
     publish: origin::Producer,
-    /// `race/<race>/<source>` -> the broadcast and a live `Dynamic` handle.
-    /// Holding the `Dynamic` makes moq-net queue a peer's SUBSCRIBE for a
-    /// track that does not exist yet; `create_track` then fulfils it.
-    broadcasts: Mutex<HashMap<String, (broadcast::Producer, broadcast::Dynamic)>>,
+    /// `race/<race>/<source>` -> the broadcast and its held early requests.
+    /// A task serves the broadcast's `Dynamic` (WP9, `limits::serve_early`):
+    /// a peer's SUBSCRIBE for a track that does not exist yet is held, up to
+    /// `MAX_EARLY_TRACKS`, until `publish` accepts it.
+    broadcasts: Mutex<HashMap<String, (broadcast::Producer, Arc<Mutex<limits::Early>>)>>,
     tracks: Mutex<HashSet<String>>,
+    /// WP9: per-remote-agent traffic counters (one tier per agent).
+    stats: moq_net::stats::Registry,
+    counters: Arc<limits::Counters>,
 }
 
 pub(crate) fn spawn_driver<D: moq_net::time::Driver + Send + 'static>(driver: D) {
@@ -130,6 +139,8 @@ impl IrohMeshTransport {
             // MoQ opens one stream per group.
             .max_concurrent_uni_streams(VarInt::from_u32(4096))
             .max_concurrent_bidi_streams(VarInt::from_u32(256))
+            // WP9: bounded unread data per connection (default: unlimited).
+            .receive_window(VarInt::from_u32(CONNECTION_RECEIVE_WINDOW))
             .max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("in range")))
             .keep_alive_interval(KEEP_ALIVE)
             .build();
@@ -177,7 +188,21 @@ impl IrohMeshTransport {
             publish,
             broadcasts: Mutex::new(HashMap::new()),
             tracks: Mutex::new(HashSet::new()),
+            stats: moq_net::stats::Registry::new(moq_net::stats::Config::new()),
+            counters: Arc::default(),
         })
+    }
+
+    /// WP9: limit-enforcement counters of this endpoint.
+    pub fn limit_stats(&self) -> LimitStats {
+        let held = self
+            .broadcasts
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, e)| e.lock().unwrap().held_len() as u64)
+            .sum();
+        limits::snapshot(&self.counters, held)
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -235,14 +260,22 @@ impl MeshTransport for IrohMeshTransport {
         remote_agent: &str,
     ) -> anyhow::Result<IrohMoqSession> {
         holochain_moq_mesh::Source::check_agent(remote_agent)?;
-        IrohMoqSession::establish(
+        let tier = moq_net::stats::Tier::new(remote_agent.to_string());
+        let session_stats = self
+            .stats
+            .tier(tier.clone())
+            .session(remote_agent.to_string());
+        limits::watch_subscriptions(&link, self.stats.clone(), tier, self.counters.clone());
+        let session = IrohMoqSession::establish(
             link,
             role,
             remote_agent,
             &self.publish,
             self.reliable_max_age,
+            session_stats,
         )
-        .await
+        .await?;
+        Ok(session)
     }
 
     fn reject(&self, link: Connection, reason: RejectReason) {
@@ -259,10 +292,11 @@ impl MeshTransport for IrohMeshTransport {
                 .publish
                 .create_broadcast(broadcast)
                 .with_context(|| format!("create broadcast {broadcast}"))?;
-            let dynamic = bc.dynamic();
+            let early = Arc::new(Mutex::new(limits::Early::default()));
+            limits::serve_early(bc.dynamic(), early.clone(), self.counters.clone());
             bc.announce(Default::default())
                 .with_context(|| format!("announce {broadcast}"))?;
-            map.insert(broadcast.to_string(), (bc, dynamic));
+            map.insert(broadcast.to_string(), (bc, early));
         }
         Ok(())
     }
@@ -273,13 +307,28 @@ impl MeshTransport for IrohMeshTransport {
         }
         self.announce(&path.broadcast())?;
         let map = self.broadcasts.lock().unwrap();
-        let (bc, _) = map.get(&path.broadcast()).expect("announced above");
-        let producer = bc
-            .create_track(
-                path.track.as_str(),
-                track::track_info(mode, self.latest_carrier, self.reliable_max_age),
-            )
-            .with_context(|| format!("create track {path}"))?;
+        let (bc, early) = map.get(&path.broadcast()).expect("announced above");
+        let info = track::track_info(mode, self.latest_carrier, self.reliable_max_age);
+        let name = path.track.as_str();
+        // A subscriber may have asked first: serve its held request. A request
+        // the early server has popped but not yet recorded shows up as
+        // `Duplicate` for a moment; wait for it to land.
+        let mut spins = 0u32;
+        let producer = loop {
+            let mut e = early.lock().unwrap();
+            if let Some(req) = e.take(name) {
+                break req.accept(info.clone());
+            }
+            match bc.create_track(name, info.clone()) {
+                Ok(p) => break p,
+                Err(moq_net::Error::Duplicate) if spins < 10_000 => {
+                    drop(e);
+                    spins += 1;
+                    std::thread::yield_now();
+                }
+                Err(err) => return Err(err).with_context(|| format!("create track {path}")),
+            }
+        };
         Ok(Box::new(track::Sink::new(
             producer,
             mode,

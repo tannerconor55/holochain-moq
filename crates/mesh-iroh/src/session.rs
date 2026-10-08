@@ -35,8 +35,14 @@ impl IrohMoqSession {
         remote_agent: &str,
         publish: &origin::Producer,
         reliable_max_age: std::time::Duration,
+        stats: moq_net::stats::Session,
     ) -> anyhow::Result<Self> {
-        let (subscribe, driver) = origin::Producer::new(origin::Config::default());
+        // WP9: what the remote sends us is cached against a bounded target.
+        let mut config = origin::Config::default();
+        config.pool = moq_net::cache::Pool::new(
+            moq_net::cache::Config::default().with_capacity(crate::SUBSCRIBE_CACHE_BYTES),
+        );
+        let (subscribe, driver) = origin::Producer::new(config);
         spawn_driver(driver);
         let now = std::time::Instant::now();
         let (session, driver) = match role {
@@ -47,6 +53,7 @@ impl IrohMoqSession {
                     conn.clone(),
                 ));
                 moq_net::Client::new()
+                    .with_stats(stats)
                     .with_versions(versions())
                     .with_publisher(publish)
                     .with_subscriber(subscribe.clone())
@@ -59,6 +66,7 @@ impl IrohMoqSession {
                     web_transport_iroh::QuicRequest::accept(conn.clone()).ok(),
                 );
                 moq_net::Server::new()
+                    .with_stats(stats)
                     .with_versions(versions())
                     .with_publisher(publish)
                     .with_subscriber(subscribe.clone())
