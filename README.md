@@ -32,7 +32,8 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP7 | Lobby control plane in the DNA: lobbies, membership, characters, host-only status, self-reported results, leaderboards, expiring iroh presence | **done, tested on real conductors** (in-process sweettest, two and three conductors, loopback websockets) - `dna/`, `crates/protocol/src/lobby.rs`, `crates/hdk-bridge/src/lobby.rs`. **Not tested between machines or over the Internet** |
 | WP6 | Reconnect and recovery: per-peer state machine, 250 ms → 4 s backoff with a 15 s give-up, re-authenticated sessions, self-healing subscriptions (`Latest` resumes at current state, `ReliableOrdered` resumes without gap or duplicate or fails with `HistoryExpired`) | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/mesh`, `crates/mesh-iroh`. **Real Internet / NAT reconnect not tested** |
 | Platform split | `gaming_directory` DNA (identity, presence, game registry) + `turbo_kart` DNA (lobbies, races, results), one agent across both apps | **done, tested on real in-process conductors** - `dna/gaming_directory`, `dna/turbo_kart`, `crates/turbo-kart`, `crates/turbo-kart-client`, `crates/platform`. **Not tested between machines** |
-| WP8 / WP9 / WP10 | Track admission / hardening and rate limits / Tauri bridge | **not started** |
+| WP8 | Realtime membership and access control: race admission from the Turbo Kart lobby + verified presence, roster-only sessions, player tracks read only from their owner, AI only from the host | **done, targeted tests green on real iroh (direct, relay-only) and real conductors** - `crates/turbo-kart-client/src/race.rs`, two guards in `crates/mesh`. Full regression pending (a `mesh` change). **Not tested between machines** |
+| WP9 / WP10 | Hardening and rate limits / Tauri bridge | **not started** |
 | Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
@@ -838,8 +839,9 @@ say nothing about Internet latency, and the relay is local.
   10 s idle timeout. That case was not measured; the removal test uses a
   graceful close.
 - **Roster fixed at start.** No peers are added later.
-- **No per-track authorization beyond membership (WP8).** Every roster
-  member can subscribe to every track.
+- **Per-track authorization is by source (WP8).** Every roster member may
+  read every member's tracks; a player's tracks are read only from that
+  player, AI only from the host.
 - **Subscribing before the publisher has created the track is not
   supported.** Publish first; WP3 will settle the semantics.
 - **`ReliableOrdered` keeps its whole single group** for the life of the
@@ -1082,14 +1084,14 @@ The integrity zome changed, so the DNA hash changed: WP7 is a new network
 ### Known limitations (WP7)
 
 - **Membership is control-plane state**, eventually consistent. The race uses the
-  setup snapshot; WP8 will use it to admit only members to race tracks (not started).
+  setup snapshot; since WP8 that snapshot (`RaceAdmission`) is the race's only admission list.
 - **Results are self-reported. Plausibility checks reject impossible values but do not
   prevent cheating.**
 - **Presence expiry is best-effort** (clocks, gossip). An EndpointId change leaves the
   agent unreachable until the older advertisement expires (≤ 2 min).
 - **Bounded reads**: 128 joins/leaves per lobby, 100 lobbies over the last ~7 h, 4
   advertisements per member, 50 results per listing.
-- **No reconnect (WP6, since done), no track admission (WP8), no hardening or rate limits (WP9):**
+- **No hardening or rate limits (WP9):**
   join attempts and result/status spam are not rate-limited.
 - **No real Internet / NAT / multi-machine validation.**
 - **`holo_hash` 0.7.0 panics** when parsing empty or non-ASCII hash text. WP7 screens
@@ -1208,3 +1210,38 @@ bounded presence reads, the Turbo Kart client, isolation tests. Not implemented:
 - Registration and release validation walk the developer's own chain (registration: to genesis; release: since the previous release), so their cost grows with that chain. A dedicated release key keeps it small.
 - The directory zomes keep the historical name `moq_directory` (media tools and bridge unchanged).
 - No real Internet / NAT / multi-machine validation.
+
+## WP8: realtime membership and access control
+
+**Authentication ≠ authorization.** iroh authenticates an EndpointId; the gaming
+directory binds it to an AgentPubKey (signed by the EndpointId); the Turbo Kart lobby
+decides whether that agent is in *this* race. Holochain is consulted at
+session/control-plane boundaries, never once per realtime game object.
+
+```text
+get_lobby (turbo_kart lobby + directory presence)      control plane, before the race
+  → RaceAdmission::from_view(view, me, now)             admitted members, one verified EndpointId each, race_id, host
+  → roster → MeshSession::start                         cached for the whole race
+  → HostSession (creator = lobby host, members, AI slots)
+race: only roster EndpointIds get a session; player tracks read only from their owner; AI only from the host. 0 Holochain calls.
+```
+
+```bash
+cargo test -p holochain-moq-turbo-kart-client                           # admission rules
+cargo test -p holochain-moq-mesh-iroh --test authorization -- --nocapture # forged sources, reconnect (direct + relay-only)
+cargo test -p holochain-moq-e2e --test race_admission -- --nocapture      # 4 and 8 admitted players, outsiders refused
+cargo test -p holochain-moq-e2e --test lobby -- --test-threads=1 --nocapture  # conductors, zero-call window incl. a refused outsider
+```
+
+### Known limitations (WP8)
+
+- **Membership is a snapshot at race setup.** A lobby leave during the race does not
+  remove the player from the running session (nor does a join add one); a new race needs
+  a new admission.
+- **Peers read every member's tracks.** Authorization is per race and per source, not per
+  track type; there are no private tracks inside a race.
+- **No rate limits (WP9):** a refused endpoint may redial (each attempt costs it a full
+  QUIC handshake and is refused before any MoQ session); a *member* may still request
+  unbounded never-published track names (queued in moq-net).
+- **No real Internet / NAT / multi-machine validation.**
+

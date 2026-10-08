@@ -1175,8 +1175,8 @@ directory or Holochain at all.
 
 - **Membership is control-plane state** with eventual consistency: two readers may see
   different members until gossip settles. The race uses the host's setup snapshot.
-- **No race admission yet (WP8).** Members are known, but nothing yet stops a non-member
-  from subscribing to a race's tracks; the snapshot is ready for WP8 to use.
+- **Race admission is WP8's** (see "Realtime authorization (WP8)"): the setup snapshot
+  is the only admission list for the race.
 - **Results are not anti-cheat.** Self-reported; plausibility only. No cross-signing,
   no check that the reporter was a member of the race, and one entry per
   `(race_id, player)` is a reader rule, not a write limit.
@@ -1409,8 +1409,8 @@ Shared identity is not shared authorization, and not shared game state:
 | modify race state | kart state, events and AI are published only on the publisher's own tracks in the race session; host authority is per session | WP2/WP5 tests |
 | read another game's private lobby | invite proofs are bound to one lobby and one player | `lobby_validation.rs` invite test |
 
-Per-track admission inside a session (members-only subscription) is WP8; today any roster
-member can subscribe to any track of its own session.
+Since WP8 a player's tracks are read only from that player's own session and AI only from
+the current host; any member may read every member's tracks (no private tracks in a race).
 
 ### Realtime boundary (unchanged, now platform-wide)
 
@@ -1774,7 +1774,7 @@ transport connection: iroh authenticates the EndpointId in the handshake; the me
    ↓
 game membership: the game's own DNA (e.g. Turbo Kart lobby joins, by AgentPubKey)
    ↓
-game realtime authorization: the roster built from membership × presence (WP8: per track)
+game realtime authorization: the roster built from membership × presence (WP8: RaceAdmission)
 ```
 
 There is one canonical mapping: a validated, unexpired `PeerEndpointEntry` in the gaming
@@ -1813,3 +1813,73 @@ directory network and the Turbo Kart network (same DNA hash). Cubyz exists only 
 network: Turbo Kart's DNA has no dependency on it, nor it on Turbo Kart; a game's cell
 reads nothing but its own DNA, and the client composes it with the directory natively.
 Not built: downloader, store, launcher, Hub (see "Gaming Hub contract").
+
+## Realtime authorization (WP8)
+
+**Authentication ≠ authorization.** An authenticated iroh/MoQ peer is not automatically
+authorized to access a game session: it must also be a verified member of that game's
+race. Holochain is consulted at session/control-plane boundaries, never once per realtime
+game object.
+
+```text
+iroh handshake            EndpointId authenticated (Ed25519)            transport   [mesh-iroh, unchanged]
+gaming_directory          AgentPubKey ↔ EndpointId, signed by the       platform    [validation, read at setup]
+                          EndpointId, live (≤ 15 min)
+turbo_kart lobby          admitted member of this lobby, race_id set    game        [validation, read at setup]
+RaceAdmission             snapshot: race_id, host, members, one         game layer  [turbo-kart-client::race, no I/O]
+                          EndpointId each
+MeshSession roster        link accepted only if its EndpointId is the   generic     [mesh, existing]
+                          roster's for an agent; one session per agent
+track access              player source read only from its owner;       generic     [mesh, WP8 guard]
+                          AI read only from the current host            + host      [host, WP5]
+```
+
+### Where authentication ends and authorization begins
+
+- **Authentication** ends at the mesh's link check: `link_remote` (the handshake's
+  EndpointId) must be the roster's identity for an agent (`NotMember`), and a dialed peer
+  must be the identity dialed (`IdentityMismatch`). Unchanged since WP2.
+- **Authorization** is the roster itself: `RaceAdmission::from_view` (game layer, in
+  `crates/turbo-kart-client`, not compiled into any DNA) admits exactly the lobby's
+  admitted members (not the wait list, not a player who left before setup), each with
+  one live, directory-verified iroh EndpointId. It refuses a lobby that is not `Starting`
+  or `Racing`, a missing or malformed race id, a local agent that is not a member, more than
+  8 members, a member without live presence, a member advertising two EndpointIds, and two
+  members sharing one.
+- **Cache:** the roster is fixed in the `MeshSession` for the race's lifetime; reconnects
+  are checked against it. No Holochain read happens after setup.
+- **Generic layers stay generic:** `mesh` knows rosters and sources, not lobbies; it
+  depends on no game, no Holochain, no iroh.
+
+### Track rules
+
+| Rule | Enforced by |
+|---|---|
+| Path `race/<race_id>/<source>/<track>`; one race per mesh (`race_id` fixed at start) | `mesh` (`TrackPath`, `RaceId` 1–32 `[A-Za-z0-9_-]`) |
+| `source` = a player's key text (≤ 64, `[A-Za-z0-9_-]`, not `ai-…`) or `ai-<slot>` | `mesh` (`Source::check_agent`) |
+| `track` ≤ 64 bytes, `[A-Za-z0-9-_./]`, no empty / `.` / `..` component | `mesh` (`TrackName`, WP8 tightened) |
+| A node publishes only its own player source | `mesh` (`publish`; no API publishes another player) |
+| A player's source is read only from that player's own session | `mesh` (`subscribe_source` refuses `Agent(x)` from peer ≠ x, WP8) - a member that publishes tracks in another's name reaches nobody |
+| AI slots: only the current host publishes; followers read AI only from the current epoch's host | `host` (`publish_ai` → `NotHost`; `classify` rejects stale / non-host frames; resubscribe on migration) |
+| The host cannot impersonate a human | host authority covers AI and host control only; player sources follow the two `mesh` rules above |
+| Host control: each member's own `host-ctl` / `host-hb` tracks (no shared `race/<id>/host` to contend for) | `host` (WP5) |
+
+### Failure behaviour
+
+- A non-member or wrong EndpointId: the QUIC connection is closed with a bounded code
+  (`NotMember` 0x4d01, `IdentityMismatch`) before any MoQ session exists, so no protected
+  data is ever sent. The close reason names no roster member.
+- The roster is fixed: a refused endpoint stays refused for this race; a corrected roster
+  means a new admission and a new session.
+- No rate limit on refused redials or subscription requests yet (WP9).
+
+### Evidence
+
+`crates/turbo-kart-client/src/race.rs` (admission rules), `crates/mesh-iroh/tests/authorization.rs`
+(forged player source reaches nobody, direct and relay-only; reconnect re-checked),
+`crates/holochain-e2e/tests/race_admission.rs` (4 and 8 admitted players over real iroh;
+wait-listed, other-race and wrong-EndpointId peers refused and receive nothing; AI only from
+the host), `crates/holochain-e2e/tests/lobby.rs` (real conductors: admission from DHT data,
+then a race window with a refused outsider, a forced reconnect and a host migration at
+0 Holochain calls). Host migration and stale epochs: `crates/host/tests/{migration,reconnect}.rs`.
+

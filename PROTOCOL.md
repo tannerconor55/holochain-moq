@@ -804,8 +804,11 @@ and track `<track>`.
 
 Examples: `race/abc123/uhCAk…A/state`, `race/abc123/ai-3/state`, `race/abc123/uhCAk…B/events`.
 Race events are per publisher (each peer's own `events` track), never a source-less
-`race/<id>/events`, so WP8 can authorize every track by its source. A subscription reads
-only the broadcast its path names, over the session with the peer that serves it.
+`race/<id>/events`, so every track is authorized by its source (WP8). A subscription reads
+only the broadcast its path names, over the session with the peer that serves it; a
+player's source only over that player's own session (`subscribe_source` refuses
+`Agent(x)` from another peer with `NotOwnSource`). Track names have no empty, `.` or `..`
+component (WP8).
 
 ### Delivery modes
 
@@ -1259,3 +1262,18 @@ unless marked "reader".
 | `list_games` | `limit` → `Vec<GameSummary>` | reader: one line per `(developer, game_id)`; ≤ 50 |
 
 `registered_at` is the author-stated action time: shown, never used to decide anything.
+
+## WP8 race admission
+
+No new wire format. Admission is decided before the race from control-plane data and
+enforced by the existing mesh link checks.
+
+| Step | Input | Output / refusal |
+|---|---|---|
+| `RaceAdmission::from_view(view, local, now_ms)` | `LobbyView` (Turbo Kart snapshot + each member's directory presence) | `RaceAdmission { lobby, race_id, host, local, members: [RaceMember { agent, endpoint_id, endpoints }], taken_at_ms }`; `AdmissionError::{NotStarted, RaceId, NotMember, TooManyMembers, NoLivePresence, AmbiguousEndpoint, SharedEndpoint, TooManyAi}` |
+| `roster(addr)` | e.g. `iroh_addr_for(&member.endpoints)` | `Vec<PeerBinding>` of every other member → `MeshSession::start` |
+| `agents()`, `host`, `ai_slots(n)` | | `HostSetup { creator, members, ai_slots }`; humans + AI ≤ 8 |
+
+Limits: ≤ 8 humans (`MAX_RACE_HUMANS`), grid ≤ 8 (`MAX_GRID`), `race_id` ≤ 32, source ≤ 64,
+track ≤ 64. Peers see only the mesh's close codes (`RejectReason`), never roster details.
+

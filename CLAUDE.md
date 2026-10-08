@@ -80,6 +80,8 @@ These are hard constraints unless a task explicitly changes them.
 
 22. **Platform governance is per author, never by timestamp.** A registry game is `(developer, game_id)`: one registration per developer and id, releases one strictly-newer chain per game, all checked in validation from the author's own chain. Never decide ownership by "earliest" action time (author-chosen) or by global uniqueness (not visible to validation). An iroh presence record must carry the EndpointId's signature over `protocol::iroh_binding_payload(endpoint_id, agent)` (dial hints are not signed: they are not identity). See ARCHITECTURE.md "Gaming platform contracts".
 
+23. **Authentication ≠ authorization (WP8).** An authenticated iroh peer is not automatically authorized for a race: the roster comes only from `RaceAdmission` (admitted lobby members × directory-verified EndpointIds), snapshotted at setup and cached for the race. A player's tracks are read only from that player's session; AI only from the current host. Holochain is consulted at session/control-plane boundaries, never once per realtime game object.
+
 ## Current architecture
 
 ```text
