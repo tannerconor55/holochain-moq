@@ -22,11 +22,14 @@ pub mod transport;
 pub mod types;
 
 pub use error::MeshError;
-pub use session::{dials, DialPolicy, MeshConfig, MeshSession, TrackPublisher, TrackSubscription};
+pub use session::{
+    backoff_delay, dials, DialPolicy, MeshConfig, MeshSession, TrackPublisher, TrackSubscription,
+};
 pub use transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 pub use types::{
-    ConnectionKind, DeliveryMode, LinkCounters, LinkInfo, MeshEvent, MeshObject, PeerBinding,
-    PeerStatus, PublisherStats, RaceId, RejectReason, Role, Source, SubscriptionStats, TrackName,
+    ConnectionKind, DeliveryMode, HistoryUnavailable, LinkCounters, LinkInfo, MeshEvent,
+    MeshObject, PeerBinding, PeerState, PeerStatus, PublisherStats, RaceId, ReconnectConfig,
+    ReconnectStats, RejectReason, Role, SessionEnd, Source, SubscriptionStats, TrackName,
     TrackPath, LATEST_MAX_PAYLOAD, LATEST_QUEUE, MAX_TRACK_NAME_LEN, RELIABLE_MAX_AGE,
     RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD, RELIABLE_QUEUE,
 };
@@ -54,6 +57,50 @@ mod tests {
             assert!(Source::check_agent(bad).is_err(), "{bad:?}");
         }
         assert!(Source::check_agent("uhCAk-agent_01").is_ok());
+    }
+
+    #[test]
+    fn reconnect_backoff_defaults_and_schedule() {
+        use std::time::Duration;
+        let cfg = ReconnectConfig::default();
+        assert_eq!(cfg.initial, Duration::from_millis(250));
+        assert_eq!(cfg.max, Duration::from_secs(4));
+        assert_eq!(cfg.give_up_after, Duration::from_secs(15));
+        assert_eq!(cfg.jitter, 0.0, "deterministic by default");
+        let ms: Vec<u128> = (0..8)
+            .map(|a| backoff_delay(&cfg, a, 7).as_millis())
+            .collect();
+        assert_eq!(ms, [250, 500, 1000, 2000, 4000, 4000, 4000, 4000]);
+        assert_eq!(
+            backoff_delay(&cfg, u32::MAX, 7),
+            Duration::from_secs(4),
+            "no overflow"
+        );
+        // Jitter only shortens, stays within its fraction, and is deterministic per seed.
+        let j = ReconnectConfig { jitter: 0.2, ..cfg };
+        for a in 0..8 {
+            let base = backoff_delay(&cfg, a, 0);
+            let d = backoff_delay(&j, a, 42);
+            assert!(
+                d <= base && d >= base.mul_f64(0.8),
+                "{a}: {d:?} vs {base:?}"
+            );
+            assert_eq!(d, backoff_delay(&j, a, 42));
+        }
+        assert_ne!(
+            backoff_delay(&j, 3, 1),
+            backoff_delay(&j, 3, 2),
+            "seeds differ"
+        );
+        // Within the default window: 250+500+1000+2000+4000+4000 = 11.75 s of
+        // back-off, so a peer that never returns costs 6-7 attempts in 15 s.
+        let mut t = Duration::ZERO;
+        let mut attempts = 0;
+        while t + backoff_delay(&cfg, attempts, 0) < cfg.give_up_after {
+            t += backoff_delay(&cfg, attempts, 0);
+            attempts += 1;
+        }
+        assert_eq!(attempts, 6);
     }
 
     #[test]

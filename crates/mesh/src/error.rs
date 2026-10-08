@@ -24,6 +24,19 @@ pub enum MeshError {
     },
     #[error("reliable track history is full ({objects} objects, {bytes} bytes)")]
     HistoryFull { objects: u64, bytes: u64 },
+    /// WP6: a `ReliableOrdered` subscription cannot resume at `next_seq`
+    /// because the publisher's bounded history no longer holds it. Sticky:
+    /// the subscription stays failed; nothing after the gap is delivered.
+    #[error("reliable history expired: cannot resume at sequence {next_seq} ({reason})")]
+    HistoryExpired { next_seq: u64, reason: String },
+    /// WP6: a `ReliableOrdered` object arrived out of sequence (a gap). Sticky.
+    #[error("reliable sequence gap: expected {expected}, got {got}")]
+    SequenceGap { expected: u64, got: u64 },
+    /// WP6: the peer left, or reconnection to it gave up.
+    #[error("peer {0} is gone (left or reconnect gave up)")]
+    PeerGone(AgentPubKeyB64),
+    #[error("the mesh is closed")]
+    Closed,
     #[error("transport: {0:#}")]
     Transport(#[from] anyhow::Error),
 }

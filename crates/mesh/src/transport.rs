@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::types::{
-    DeliveryMode, LinkInfo, MeshObject, PublisherStats, RejectReason, Role, SubscriptionStats,
-    TrackPath,
+    DeliveryMode, LinkInfo, MeshObject, PublisherStats, RejectReason, Role, SessionEnd,
+    SubscriptionStats, TrackPath,
 };
 
 #[async_trait]
@@ -77,9 +77,36 @@ pub trait TransportSession: Send + Sync {
         path: &TrackPath,
         mode: DeliveryMode,
     ) -> anyhow::Result<Box<dyn TrackSource>>;
+    /// WP6: subscribe resuming at `next_seq`: for `ReliableOrdered`, deliver
+    /// from object `next_seq` on (earlier ones are skipped), or fail with
+    /// [`crate::HistoryUnavailable`] if the publisher no longer has it; for
+    /// `Latest`, `next_seq` is ignored (only new state is ever delivered).
+    /// The default supports only a fresh subscription.
+    fn subscribe_from(
+        &self,
+        path: &TrackPath,
+        mode: DeliveryMode,
+        next_seq: u64,
+    ) -> anyhow::Result<Box<dyn TrackSource>> {
+        if next_seq == 0 || mode == DeliveryMode::Latest {
+            return self.subscribe(path, mode);
+        }
+        anyhow::bail!("this transport cannot resume a reliable subscription")
+    }
     /// Resolves once the session is gone, for whatever reason.
     async fn closed(&self);
+    /// Close deliberately: the remote treats it as a leave ([`SessionEnd::Left`]).
     fn close(&self);
+    /// WP6: close *without* signalling a leave (superseded or forced): the
+    /// remote treats it as a loss and reconnects. Default: [`Self::close`].
+    fn abort(&self) {
+        self.close()
+    }
+    /// WP6: how the session ended, once [`Self::closed`] resolved. Default:
+    /// always a loss (reconnect).
+    fn end_reason(&self) -> SessionEnd {
+        SessionEnd::Lost("session closed".into())
+    }
 }
 
 /// Writes one local track.
@@ -93,7 +120,8 @@ pub trait TrackSink: Send {
 #[async_trait]
 pub trait TrackSource: Send {
     /// `Ok(Some)` next object, `Ok(None)` the publisher ended the track,
-    /// `Err` the session was lost (or, `ReliableOrdered`, history was lost).
+    /// `Err` the session was lost (or, `ReliableOrdered`, history was lost:
+    /// then the error wraps a [`crate::HistoryUnavailable`]).
     async fn recv(&mut self) -> anyhow::Result<Option<MeshObject>>;
     fn stats(&self) -> SubscriptionStats;
 }

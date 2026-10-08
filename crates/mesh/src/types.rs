@@ -221,7 +221,8 @@ pub struct MeshObject {
     pub payload: bytes::Bytes,
 }
 
-/// What one subscription has seen. Counters only grow.
+/// What one subscription has seen. Counters only grow, across reconnects
+/// (a [`crate::TrackSubscription`] sums the stats of every session it used).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubscriptionStats {
     /// Objects that reached this subscription from the network.
@@ -240,6 +241,127 @@ pub struct SubscriptionStats {
     pub newest_seq: Option<u64>,
     /// Objects waiting for the application right now.
     pub queued: usize,
+    /// WP6: times the subscription was re-established on a new session.
+    pub resubscribes: u64,
+    /// WP6, `ReliableOrdered`: objects recovered from the publisher's history
+    /// (fetched groups) rather than the live stream, e.g. after a reconnect.
+    pub replayed: u64,
+}
+
+impl SubscriptionStats {
+    /// Fold the stats of a finished (per-session) source into a running total.
+    pub fn absorb(&mut self, o: &SubscriptionStats) {
+        self.received += o.received;
+        self.delivered += o.delivered;
+        self.dropped_overflow += o.dropped_overflow;
+        self.stale += o.stale;
+        self.missing += o.missing;
+        self.duplicates += o.duplicates;
+        self.replayed += o.replayed;
+        self.resubscribes += o.resubscribes;
+        self.newest_seq = self.newest_seq.max(o.newest_seq);
+    }
+}
+
+/// WP6: a `ReliableOrdered` resume point the publisher can no longer serve
+/// (its bounded history no longer holds `next_seq`). Transports return it
+/// (inside `anyhow::Error`) from [`crate::TrackSource::recv`]; the mesh turns
+/// it into [`crate::MeshError::HistoryExpired`]. Never a silent skip.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("reliable history unavailable from sequence {next_seq}: {reason}")]
+pub struct HistoryUnavailable {
+    pub next_seq: u64,
+    pub reason: String,
+}
+
+/// WP6: how a transport session ended, as far as the transport can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// The remote closed it deliberately (its mesh closed or was dropped):
+    /// a permanent leave, no reconnect.
+    Left,
+    /// Anything else (forced close, reset, idle timeout, path loss): the peer
+    /// may come back, so the mesh reconnects.
+    Lost(String),
+}
+
+/// WP6: automatic reconnection after a session is lost (not after a leave).
+///
+/// The designated dialer (the lower agent) re-dials with bounded exponential
+/// backoff: `initial`, doubling, capped at `max`, for at most `give_up_after`
+/// from the moment the session was lost. The other side waits as long. Every
+/// attempt re-runs the full identity check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconnectConfig {
+    pub initial: std::time::Duration,
+    pub max: std::time::Duration,
+    pub give_up_after: std::time::Duration,
+    /// Each delay is shortened by up to this fraction (0.0 = no jitter, the
+    /// default, so behaviour is deterministic). The jitter itself is
+    /// deterministic per (local, remote) pair.
+    pub jitter: f64,
+    /// Longest one dial + handshake may take before it counts as failed.
+    pub attempt_timeout: std::time::Duration,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            initial: std::time::Duration::from_millis(250),
+            max: std::time::Duration::from_secs(4),
+            give_up_after: std::time::Duration::from_secs(15),
+            jitter: 0.0,
+            attempt_timeout: std::time::Duration::from_secs(3),
+        }
+    }
+}
+
+/// Where one roster peer is in its connection life cycle.
+///
+/// ```text
+/// Connecting ─▶ Connected ─(lost)─▶ Disconnected ─▶ Waiting ⇄ Dialing ─▶ Authenticating ─▶ Connected
+///                    │                                  └──────(give_up_after)──────▶ GaveUp
+///                    └─(remote left)─▶ Left
+/// ```
+///
+/// `Dialing`/`Authenticating` occur only on the designated dialer; the other
+/// side stays `Waiting` until the dialer's link arrives. A reconnect returns
+/// to `Connected` (announced by `ReconnectSucceeded`, not a second
+/// `PeerJoined`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerState {
+    /// Never connected yet (initial dialing).
+    Connecting,
+    Connected,
+    /// The session was just lost; recovery is starting.
+    Disconnected,
+    /// Backing off before the next dial, or waiting for the remote to dial.
+    Waiting,
+    Dialing,
+    /// Authenticated link, checking identity and running the session handshake.
+    Authenticating,
+    /// Reconnection failed for `give_up_after`: removed from the live mesh.
+    GaveUp,
+    /// The remote closed its session deliberately: removed, no reconnect.
+    Left,
+    /// Initial dialing failed (`DialFailed`).
+    Unreachable,
+}
+
+/// WP6 per-peer reconnect counters (since the mesh started).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReconnectStats {
+    /// Sessions lost (not counting deliberate leaves).
+    pub disconnects: u64,
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub give_ups: u64,
+    /// Lost-to-reconnected time of the last successful recovery.
+    pub last_outage: Option<std::time::Duration>,
+    /// The delay before the next attempt, while backing off.
+    pub current_backoff: Option<std::time::Duration>,
+    pub last_disconnect_reason: Option<String>,
 }
 
 /// What one publisher has sent. For `ReliableOrdered`, `objects`/`bytes` are
@@ -313,6 +435,10 @@ pub struct PeerStatus {
     pub since: Option<Instant>,
     /// Transport counters for the current session, if exposed.
     pub counters: Option<LinkCounters>,
+    /// WP6: connection life-cycle state.
+    pub state: PeerState,
+    /// WP6: reconnect counters.
+    pub reconnect: ReconnectStats,
 }
 
 /// Why an incoming or outgoing connection was refused before any track
@@ -353,13 +479,48 @@ pub enum MeshEvent {
         kind: Option<ConnectionKind>,
         at: Instant,
     },
-    PeerLeft {
+    /// The peer is no longer part of the live mesh: it left deliberately,
+    /// or (WP6) reconnection gave up. A transient loss is `PeerDisconnected`,
+    /// never `PeerLeft`.
+    PeerLeft { agent: AgentPubKeyB64, at: Instant },
+    /// WP6: the session with `agent` was lost (not a deliberate leave). The
+    /// peer stays a roster member; recovery starts at once. Always followed
+    /// by `Reconnecting`, then `ReconnectSucceeded` or `ReconnectGiveUp`.
+    PeerDisconnected {
         agent: AgentPubKeyB64,
+        reason: String,
         at: Instant,
     },
-    /// Reserved for WP6 (automatic reconnect). Never emitted in WP2.
-    Reconnecting {
+    /// WP6 (reserved since WP2): recovery of `agent` started ("reconnect
+    /// started"). Emitted once per outage, not per attempt.
+    Reconnecting { agent: AgentPubKeyB64, at: Instant },
+    /// WP6: one reconnect attempt failed; another follows after `next_delay`
+    /// unless the give-up window has passed.
+    ReconnectFailed {
         agent: AgentPubKeyB64,
+        attempt: u32,
+        error: String,
+        next_delay: Option<std::time::Duration>,
+        at: Instant,
+    },
+    /// WP6: a new authenticated session replaced the lost one. Subscriptions
+    /// resume on it by themselves. The logical counterpart of `PeerJoined`
+    /// for a returning peer (no second `PeerJoined` is emitted).
+    ReconnectSucceeded {
+        agent: AgentPubKeyB64,
+        role: Role,
+        kind: Option<ConnectionKind>,
+        attempts: u32,
+        outage: std::time::Duration,
+        at: Instant,
+    },
+    /// WP6: no session could be re-established within the give-up window.
+    /// Followed by `PeerLeft`; subscriptions to the peer end with
+    /// [`crate::MeshError::PeerGone`].
+    ReconnectGiveUp {
+        agent: AgentPubKeyB64,
+        attempts: u32,
+        outage: std::time::Duration,
         at: Instant,
     },
     ConnectionKindChanged {
