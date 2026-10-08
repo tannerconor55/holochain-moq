@@ -3237,6 +3237,7 @@ dependencies = [
  "async-trait",
  "holo_hash",
  "holochain-moq-hdk-bridge",
+ "holochain-moq-mesh",
  "holochain-moq-node",
  "holochain-moq-protocol",
  "holochain-moq-turbo-kart",

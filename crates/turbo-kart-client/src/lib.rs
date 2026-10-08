@@ -13,6 +13,9 @@
 //! the gaming directory. Called around a race (discovery, joining, setup,
 //! status, results, leaderboards), never during one.
 
+pub mod race;
+pub use race::{AdmissionError, RaceAdmission, RaceMember, MAX_GRID, MAX_RACE_HUMANS};
+
 use std::sync::Arc;
 
 use holo_hash::ActionHash;

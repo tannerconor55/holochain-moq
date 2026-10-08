@@ -10,6 +10,8 @@ holochain-moq-protocol = { workspace = true }
 holochain-moq-node = { workspace = true }
 holochain-moq-hdk-bridge = { workspace = true }
 holochain-moq-turbo-kart = { path = "../turbo-kart" }
+# WP8: race admission produces the generic mesh roster (no iroh, no Holochain in mesh).
+holochain-moq-mesh = { workspace = true }
 holo_hash = "=0.7.0"
 holochain_client = "=0.9.0"
 async-trait = { workspace = true }
