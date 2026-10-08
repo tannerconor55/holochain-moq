@@ -460,13 +460,16 @@ fn extern_names(rel: &str) -> Vec<String> {
 /// nothing media-shaped (`send_media`/`publish_frame`/...) and no game's
 /// records. (`sign_admission_proof`, Stage 14F: a signature over a
 /// session/challenge, never media. Platform split: bounded presence reads and
-/// the game registry; the WP7 lobby functions moved to the Turbo Kart DNA.)
+/// the game registry; the WP7 lobby functions moved to the Turbo Kart DNA.
+/// Registry governance: signed iroh presence, lookup of a `game_id`'s
+/// registrations.)
 #[test]
 fn coordinator_exposes_only_the_control_plane_functions() {
     assert_eq!(
         extern_names("../../dna/gaming_directory/coordinator/src/lib.rs"),
         [
             "create_stream",
+            "find_games",
             "get_endpoint_advertisements",
             "get_game",
             "get_peer",
@@ -480,6 +483,7 @@ fn coordinator_exposes_only_the_control_plane_functions() {
             "publish_endpoint_advertisement",
             "publish_release",
             "publish_session",
+            "publish_signed_presence",
             "register_game",
             // Stage 14F: signs a private-session admission proof with the agent's own key.
             "sign_admission_proof"

@@ -4,8 +4,8 @@
 
 use super::*;
 use holochain_moq_protocol::{
-    Capability, Endpoint, EndpointKind, Session, SessionId, StreamKind, StreamLifecycle,
-    TransportIdentity,
+    BindingSignature, Capability, Endpoint, EndpointKind, Session, SessionId, StreamKind,
+    StreamLifecycle, TransportIdentity,
 };
 use std::sync::Mutex;
 use uuid_shim::new_id;
@@ -773,11 +773,21 @@ async fn presence_that_validation_would_reject_never_reaches_the_conductor() {
     assert!(matches!(
         d.presence(
             iroh_ep(),
+            BindingSignature::from_bytes(&[1; 64]),
             0,
             holochain_moq_protocol::MAX_PRESENCE_TTL_MS + 1
         )
         .unwrap_err(),
         DirectoryError::InvalidPresence(_)
+    ));
+    let signed = d
+        .presence(iroh_ep(), BindingSignature::from_bytes(&[1; 64]), 0, 1_000)
+        .unwrap();
+    let mut foreign_signed = signed.clone();
+    foreign_signed.advertisement.peer_endpoint.agent = agent(2).to_string();
+    assert!(matches!(
+        d.publish_signed_presence(foreign_signed).await.unwrap_err(),
+        DirectoryError::EndpointAuthorMismatch { .. }
     ));
     let foreign = EndpointAdvertisement {
         peer_endpoint: PeerEndpoint {

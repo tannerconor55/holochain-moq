@@ -6,7 +6,10 @@ use super::*;
 use async_trait::async_trait;
 use holo_hash::AgentPubKey;
 use holochain_client::{ConductorApiError, ExternIO};
-use holochain_moq_protocol::{Endpoint, EndpointKind, PeerEndpoint, TransportIdentity};
+use holochain_moq_protocol::{
+    BindingSignature, Endpoint, EndpointAdvertisement, EndpointKind, PeerEndpoint,
+    TransportIdentity,
+};
 use holochain_moq_turbo_kart::LobbyState;
 use std::sync::Mutex;
 
@@ -50,7 +53,14 @@ fn id() -> String {
     holo_hash::ActionHash::from_raw_32(vec![9; 32]).to_string()
 }
 
-fn iroh_ad(agent: String, expires: Option<i64>) -> EndpointAdvertisement {
+fn iroh_ad(agent: String, expires: Option<i64>) -> SignedPresence {
+    SignedPresence {
+        advertisement: iroh_ad_unsigned(agent, expires),
+        binding_signature: BindingSignature::from_bytes(&[7; 64]),
+    }
+}
+
+fn iroh_ad_unsigned(agent: String, expires: Option<i64>) -> EndpointAdvertisement {
     EndpointAdvertisement {
         peer_endpoint: PeerEndpoint {
             agent,

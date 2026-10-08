@@ -25,9 +25,11 @@ use holochain_moq_hdk_bridge::{
 };
 use holochain_moq_host::{HostConfig, HostEvent, HostSession, HostSetup};
 use holochain_moq_mesh::{DeliveryMode, MeshConfig, MeshSession, PeerBinding, RaceId, TrackName};
-use holochain_moq_mesh_iroh::{iroh_addr_for, iroh_endpoint, IrohConfig, IrohMeshTransport, Reach};
+use holochain_moq_mesh_iroh::{
+    iroh_addr_for, iroh_endpoint, IrohConfig, IrohMeshTransport, Reach, SecretKey,
+};
 use holochain_moq_node::DirectoryError;
-use holochain_moq_protocol::{Endpoint, PRESENCE_TTL_MS};
+use holochain_moq_protocol::{iroh_binding_payload, BindingSignature, Endpoint, PRESENCE_TTL_MS};
 use holochain_moq_turbo_kart::{
     CreateLobbyInput, JoinLobbyInput, LeaderboardEntry, LeaderboardInput, LobbyId, LobbySnapshot,
     LobbyState, LobbyStatus, LobbySummary, LobbyView, RaceResult,
@@ -135,12 +137,20 @@ fn join(lobby: &str, character: &str) -> JoinLobbyInput {
     }
 }
 
-async fn bind_iroh(agent: &str) -> (IrohMeshTransport, Endpoint) {
-    let t = IrohMeshTransport::bind(IrohConfig::new(Reach::DirectOnly), agent)
+/// Bind an iroh endpoint with a key the app holds, and sign the binding of its
+/// EndpointId to `agent` with that key (the directory requires it).
+async fn bind_iroh(agent: &str) -> (IrohMeshTransport, Endpoint, BindingSignature) {
+    let key = SecretKey::generate();
+    let id = *key.public().as_bytes();
+    let binding =
+        BindingSignature::from_bytes(&key.sign(&iroh_binding_payload(&id, agent)).to_bytes());
+    let mut config = IrohConfig::new(Reach::DirectOnly);
+    config.secret_key = Some(key);
+    let t = IrohMeshTransport::bind(config, agent)
         .await
         .expect("bind iroh");
     let rec = iroh_endpoint(&t.addr(Duration::ZERO).await).expect("iroh record");
-    (t, rec)
+    (t, rec, binding)
 }
 
 /// The race-setup roster from a lobby snapshot: every other member's live
@@ -170,15 +180,15 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     let (bdir, bcalls) = counting_client(&net, BOB).await;
 
     // Each app binds its iroh endpoint and advertises it with the lobby call.
-    let (at, arec) = bind_iroh(&alice).await;
-    let (bt, brec) = bind_iroh(&bob).await;
+    let (at, arec, asig) = bind_iroh(&alice).await;
+    let (bt, brec, bsig) = bind_iroh(&bob).await;
     let a_ad = adir
         .directory()
-        .presence(arec.clone(), unix_now_ms(), PRESENCE_TTL_MS)
+        .presence(arec.clone(), asig, unix_now_ms(), PRESENCE_TTL_MS)
         .unwrap();
     let b_ad = bdir
         .directory()
-        .presence(brec.clone(), unix_now_ms(), PRESENCE_TTL_MS)
+        .presence(brec.clone(), bsig, unix_now_ms(), PRESENCE_TTL_MS)
         .unwrap();
 
     // Alice creates a public lobby.
@@ -757,16 +767,20 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     let bdir = net.directory(BOB).await;
     let akart = kart_client(&net, ALICE, adir.clone()).await;
     let bkart = kart_client(&net, BOB, bdir.clone()).await;
-    let (at, arec) = bind_iroh(&alice).await;
-    let (_bt, brec) = bind_iroh(&bob).await;
+    let (at, arec, asig) = bind_iroh(&alice).await;
+    let (_bt, brec, bsig) = bind_iroh(&bob).await;
 
     // Initial publish with the lobby; Bob joins with his own.
     let t0 = unix_now_ms();
     let input = create("Presence", 4, "blaze");
-    let a_ad = adir.presence(arec.clone(), t0, 3_000).unwrap();
+    let a_ad = adir
+        .presence(arec.clone(), asig.clone(), t0, 3_000)
+        .unwrap();
     let lid = akart.create_lobby(input, Some(a_ad)).await.unwrap();
     net.settle().await;
-    let b_ad = bdir.presence(brec.clone(), t0, PRESENCE_TTL_MS).unwrap();
+    let b_ad = bdir
+        .presence(brec.clone(), bsig.clone(), t0, PRESENCE_TTL_MS)
+        .unwrap();
     bkart
         .join_lobby(join(&lid, "rex"), Some(b_ad))
         .await
@@ -791,6 +805,7 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     let refresher = PresenceRefresher::spawn_with(
         adir.clone(),
         arec.clone(),
+        asig.clone(),
         Duration::from_millis(500),
         3_000,
     );
@@ -833,7 +848,9 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     let mut costs = Vec::new();
     for _ in 0..10 {
         let t = Instant::now();
-        adir.publish_presence(arec.clone()).await.unwrap();
+        adir.publish_presence(arec.clone(), asig.clone())
+            .await
+            .unwrap();
         costs.push(ms(t.elapsed()));
     }
     costs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -841,26 +858,40 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
     // (4) A wrong EndpointId claiming to be Alice: Bob cannot author an
     // advertisement in Alice's name (bridge check, and validation - see
     // lobby_validation.rs).
-    let mut forged = bdir.presence(arec.clone(), unix_now_ms(), 3_000).unwrap();
-    forged.peer_endpoint.agent = alice.clone();
+    let mut forged = bdir
+        .presence(arec.clone(), asig.clone(), unix_now_ms(), 3_000)
+        .unwrap();
+    forged.advertisement.peer_endpoint.agent = alice.clone();
     assert!(matches!(
-        bdir.publish_endpoint_advertisement(forged)
-            .await
-            .unwrap_err(),
+        bdir.publish_signed_presence(forged).await.unwrap_err(),
         DirectoryError::EndpointAuthorMismatch { .. }
     ));
-    // Bob *can* advertise Alice's public EndpointId as his own (the DNA cannot
-    // check global uniqueness deterministically). Race setup refuses it: the
-    // mesh will not bind two agents to one transport identity, and Alice's own
-    // mesh refuses a peer bound to her own key.
-    bdir.publish_presence(arec.clone()).await.unwrap();
+    // Nor can Bob advertise Alice's public EndpointId as his own: the DNA
+    // requires the EndpointId's own signature over its binding to the
+    // advertising agent. Alice's signature binds Alice; one made with Bob's
+    // iroh key is not the EndpointId's. Both are rejected by validation.
+    for (sig, what) in [(&asig, "Alice's binding"), (&bsig, "Bob's iroh key")] {
+        let squat = bdir
+            .presence(arec.clone(), sig.clone(), unix_now_ms(), 3_000)
+            .unwrap();
+        assert!(
+            matches!(
+                bdir.publish_signed_presence(squat).await.unwrap_err(),
+                DirectoryError::ZomeCallFailed { .. }
+            ),
+            "Bob claiming Alice's EndpointId with {what}"
+        );
+    }
     net.settle().await;
     let v = akart.get_lobby(&lid).await.unwrap().unwrap();
     let now = unix_now_ms();
-    let bob_eps = v.live_iroh_endpoints(&bob, now);
-    assert!(bob_eps.contains(&arec) && bob_eps.contains(&brec));
-    let err = iroh_addr_for(&bob_eps).unwrap_err();
-    assert!(err.to_string().contains("refusing to choose"), "{err}");
+    assert_eq!(
+        v.live_iroh_endpoints(&bob, now),
+        vec![brec.clone()],
+        "Bob is bound only to his own EndpointId"
+    );
+    // Defence in depth, unchanged: a roster binding a peer to the local
+    // EndpointId is still refused by the mesh.
     let squat = vec![PeerBinding {
         agent: bob.clone(),
         addr: iroh_addr_for(&[arec.clone()]).unwrap(),
@@ -879,10 +910,18 @@ async fn presence_expires_refreshes_and_keeps_the_endpoint_id_binding() {
 
     // (7) No downgrade path: the DNA refuses an iroh advertisement without an
     // expiry, so there is no never-expiring presence to fall back on.
-    let mut forever = adir.presence(arec.clone(), unix_now_ms(), 3_000).unwrap();
-    forever.expires_at = None;
+    let mut forever = adir
+        .presence(arec.clone(), asig.clone(), unix_now_ms(), 3_000)
+        .unwrap();
+    forever.advertisement.expires_at = None;
     assert!(matches!(
-        adir.publish_endpoint_advertisement(forever.clone())
+        adir.publish_signed_presence(forever.clone())
+            .await
+            .unwrap_err(),
+        DirectoryError::InvalidPresence(_)
+    ));
+    assert!(matches!(
+        adir.publish_endpoint_advertisement(forever.advertisement.clone())
             .await
             .unwrap_err(),
         DirectoryError::ZomeCallFailed { .. }
