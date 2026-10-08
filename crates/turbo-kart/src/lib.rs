@@ -1,5 +1,11 @@
-//! Kart-online lobby control plane (WP7): lobbies, membership, race status and
-//! self-reported results, plus the bounds and plausibility rules the DNA enforces.
+//! Turbo Kart's control-plane records (the `turbo_kart` DNA): lobbies,
+//! membership, race status and self-reported results, plus the bounds and
+//! plausibility rules the DNA enforces. **Game-specific**: nothing here is a
+//! platform record, and no platform or realtime crate depends on this one.
+//!
+//! The player identity is the platform's: every record names its author by
+//! the same `AgentPubKey` the gaming directory binds to an iroh EndpointId;
+//! this DNA has no identity, endpoint or presence records of its own.
 //!
 //! Everything here is durable, slow-changing control-plane data. None of it is
 //! read or written while a race is being delivered: the mesh takes a membership
@@ -7,9 +13,7 @@
 //!
 //! # Identities and references
 //!
-//! As elsewhere in this crate (`AgentPubKeyB64`), Holochain hashes are carried
-//! in their base64 text form so this crate stays free of `holo_hash`. A
-//! [`LobbyId`] is the `ActionHash` (base64) of the action that created the
+//! A [`LobbyId`] is the `ActionHash` (base64) of the action that created the
 //! [`Lobby`] entry. The integrity zome parses it back and resolves it with
 //! `must_get_valid_record`, which is deterministic.
 //!
@@ -18,8 +22,6 @@
 //! * `Lobby::host`, `LobbyJoin::player`, `LobbyLeave::player` and
 //!   `RaceResult::player` must equal the action's author.
 //! * A `LobbyStatus` must be authored by the referenced lobby's host.
-//! * The host is whoever authored the `Lobby` entry. WP5 host migration
-//!   changes who runs the race; it does not change who may author status.
 //!
 //! # Results are self-reported
 //!
@@ -34,22 +36,22 @@
 //! signs `(lobby, player)` with it ([`invite_proof`]). Any validator can then
 //! check the proof against the lobby's verify key without learning the code,
 //! and the proof cannot be replayed by another player. The stored key still
-//! lets anyone test guesses offline, so codes must be high-entropy (the
-//! [`MIN_INVITE_CODE_LEN`] floor is a minimum, not a guarantee).
+//! lets anyone test guesses offline, so codes must be high-entropy.
 //!
-//! This module reads no clock: every time is passed in by the caller, as with
-//! [`crate::EndpointAdvertisement`].
+//! This module reads no clock: every time is passed in by the caller.
 
-use crate::admission::signature_bytes;
-use crate::advertisement::{live_endpoints, EndpointAdvertisement};
-use crate::endpoint::{AgentPubKeyB64, Endpoint, EndpointKind, MAX_IROH_RELAYS};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use holochain_moq_protocol::admission::signature_bytes;
+pub use holochain_moq_protocol::hash::{
+    looks_like_action_hash, ActionHashB64, ACTION_HASH_B64_LEN,
+};
+use holochain_moq_protocol::{
+    live_endpoints, AgentPubKeyB64, Endpoint, EndpointAdvertisement, EndpointKind, MAX_IROH_RELAYS,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-/// Base64 text of a Holochain `ActionHash`.
-pub type ActionHashB64 = String;
 /// The `ActionHash` (base64) of a lobby's creating action.
 pub type LobbyId = ActionHashB64;
 
@@ -110,13 +112,6 @@ pub const MAX_INVITE_CODE_LEN: usize = 64;
 /// never by validators (they only verify a signature).
 pub const INVITE_KDF_ROUNDS: u32 = 10_000;
 
-/// How long a presence (endpoint) advertisement is valid.
-pub const PRESENCE_TTL_MS: i64 = 120_000;
-/// How often an open app republishes its presence.
-pub const PRESENCE_REFRESH_MS: i64 = 60_000;
-/// The longest validity an iroh endpoint advertisement may state.
-pub const MAX_PRESENCE_TTL_MS: i64 = 15 * 60_000;
-
 /// Hour-sized discovery buckets (ms).
 pub const LOBBY_BUCKET_MS: i64 = 3_600_000;
 /// `list_open_lobbies` looks at the current bucket and this many before it.
@@ -135,19 +130,6 @@ pub const LEADERBOARD_BAND_MS: u32 = 10_000;
 
 const KDF_DOMAIN: &[u8] = b"holochain-moq/kart/invite-kdf/v1";
 const PROOF_DOMAIN: &[u8] = b"holochain-moq/kart/invite-proof/v1";
-
-/// Length of a base64 `ActionHash` (`u` + 52 characters).
-pub const ACTION_HASH_B64_LEN: usize = 53;
-
-/// Cheap shape check before handing text to `holo_hash`'s parser, which
-/// panics (slices by byte) on empty or non-ASCII input in 0.7.0. Lobby
-/// references come from other agents, so they must be screened first.
-pub fn looks_like_action_hash(s: &str) -> bool {
-    s.len() == ACTION_HASH_B64_LEN
-        && s.starts_with("uhCkk")
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
 
 pub fn track(id: &str) -> Option<TrackSpec> {
     TRACKS.iter().copied().find(|t| t.id == id)
@@ -178,8 +160,6 @@ pub enum LobbyError {
     InviteProofUnexpected,
     InviteProofInvalid,
     StatusRaceId,
-    PresenceNoExpiry,
-    PresenceTtl(i64),
 }
 
 impl fmt::Display for LobbyError {
@@ -211,11 +191,6 @@ impl fmt::Display for LobbyError {
             Self::StatusRaceId => write!(
                 f,
                 "Starting/Racing/Finished need a race_id; Open must not have one"
-            ),
-            Self::PresenceNoExpiry => write!(f, "an iroh endpoint advertisement must expire"),
-            Self::PresenceTtl(t) => write!(
-                f,
-                "iroh endpoint advertisement valid for {t} ms, at most {MAX_PRESENCE_TTL_MS}"
             ),
         }
     }
@@ -554,22 +529,6 @@ impl RaceResult {
     }
 }
 
-/// The DNA's presence rule for an iroh endpoint advertisement: it must expire,
-/// within [`MAX_PRESENCE_TTL_MS`]. Other kinds are unaffected.
-pub fn check_presence(ad: &EndpointAdvertisement) -> Result<(), LobbyError> {
-    if ad.endpoint().kind != EndpointKind::Iroh {
-        return Ok(());
-    }
-    let Some(expires) = ad.expires_at else {
-        return Err(LobbyError::PresenceNoExpiry);
-    };
-    let ttl = expires.saturating_sub(ad.published_at);
-    if ttl > MAX_PRESENCE_TTL_MS {
-        return Err(LobbyError::PresenceTtl(ttl));
-    }
-    Ok(())
-}
-
 /// Path of the discovery bucket a lobby created at `created_at_ms` lives in.
 pub fn lobby_bucket(created_at_ms: i64) -> String {
     format!("kart.lobbies.{}", created_at_ms.div_euclid(LOBBY_BUCKET_MS))
@@ -692,6 +651,29 @@ pub fn resolve_status(
     current
 }
 
+/// What the `turbo_kart` DNA returns for a lobby: its records only. The
+/// members' presence lives in the gaming directory; a client composes the two
+/// into a [`LobbyView`] ([`LobbyView::compose`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbySnapshot {
+    pub id: LobbyId,
+    pub lobby: Lobby,
+    pub created_at: i64,
+    pub status: Option<StatusRecord>,
+    pub members: Vec<Member>,
+    pub waitlist: Vec<Member>,
+}
+
+impl LobbySnapshot {
+    pub fn is_member(&self, agent: &str) -> bool {
+        self.members.iter().any(|m| m.player == agent)
+    }
+
+    pub fn state(&self) -> Option<LobbyState> {
+        self.status.as_ref().map(|s| s.status.state)
+    }
+}
+
 /// A member with their newest endpoint advertisements (unfiltered by expiry).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberView {
@@ -711,6 +693,30 @@ pub struct LobbyView {
 }
 
 impl LobbyView {
+    /// A lobby snapshot (turbo_kart DNA) plus each admitted member's newest
+    /// presence advertisements (gaming directory), by member order.
+    pub fn compose(
+        snapshot: LobbySnapshot,
+        mut presence: impl FnMut(&Member) -> Vec<EndpointAdvertisement>,
+    ) -> Self {
+        let members = snapshot
+            .members
+            .into_iter()
+            .map(|m| MemberView {
+                endpoints: presence(&m),
+                member: m,
+            })
+            .collect();
+        Self {
+            id: snapshot.id,
+            lobby: snapshot.lobby,
+            created_at: snapshot.created_at,
+            status: snapshot.status,
+            members,
+            waitlist: snapshot.waitlist,
+        }
+    }
+
     pub fn host(&self) -> &AgentPubKeyB64 {
         &self.lobby.host
     }
@@ -763,8 +769,6 @@ pub struct CreateLobbyInput {
     /// The host's own racer (the host joins its lobby on creation).
     pub character_id: String,
     pub invite_code: Option<String>,
-    /// Presence to publish alongside, if any.
-    pub endpoint: Option<EndpointAdvertisement>,
 }
 
 impl fmt::Debug for CreateLobbyInput {
@@ -781,7 +785,6 @@ impl fmt::Debug for CreateLobbyInput {
                 "invite_code",
                 &self.invite_code.as_ref().map(|_| "<redacted>"),
             )
-            .field("endpoint", &self.endpoint)
             .finish()
     }
 }
@@ -792,7 +795,6 @@ pub struct JoinLobbyInput {
     pub lobby: LobbyId,
     pub character_id: String,
     pub invite_code: Option<String>,
-    pub endpoint: Option<EndpointAdvertisement>,
 }
 
 impl fmt::Debug for JoinLobbyInput {
@@ -804,7 +806,6 @@ impl fmt::Debug for JoinLobbyInput {
                 "invite_code",
                 &self.invite_code.as_ref().map(|_| "<redacted>"),
             )
-            .field("endpoint", &self.endpoint)
             .finish()
     }
 }
@@ -818,7 +819,7 @@ pub struct LeaderboardInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoint::{PeerEndpoint, TransportIdentity};
+    use holochain_moq_protocol::{PeerEndpoint, TransportIdentity};
 
     fn lobby() -> Lobby {
         Lobby {
@@ -1202,38 +1203,29 @@ mod tests {
     }
 
     #[test]
-    fn presence_rule_and_expired_endpoints_are_never_returned() {
-        check_presence(&ad(EndpointKind::Iroh, 1, 0, Some(PRESENCE_TTL_MS))).unwrap();
-        assert_eq!(
-            check_presence(&ad(EndpointKind::Iroh, 1, 0, None)).unwrap_err(),
-            LobbyError::PresenceNoExpiry
-        );
-        assert!(
-            check_presence(&ad(EndpointKind::Iroh, 1, 0, Some(MAX_PRESENCE_TTL_MS + 1))).is_err()
-        );
-        // Other kinds keep their existing rules.
-        check_presence(&ad(EndpointKind::Direct, 1, 0, None)).unwrap();
-
-        let view = LobbyView {
+    fn composed_view_never_returns_expired_or_non_iroh_endpoints() {
+        let snapshot = LobbySnapshot {
             id: "L".into(),
             lobby: lobby(),
             created_at: 0,
             status: None,
-            members: vec![MemberView {
-                member: Member {
-                    player: "bob".into(),
-                    character_id: "rex".into(),
-                    joined_at: 0,
-                    join: "j".into(),
-                },
-                endpoints: vec![
-                    ad(EndpointKind::Iroh, 2, 60_000, Some(180_000)), // refreshed
-                    ad(EndpointKind::Iroh, 1, 0, Some(120_000)),
-                    ad(EndpointKind::Direct, 3, 0, None),
-                ],
+            members: vec![Member {
+                player: "bob".into(),
+                character_id: "rex".into(),
+                joined_at: 0,
+                join: "j".into(),
             }],
             waitlist: vec![],
         };
+        assert!(snapshot.is_member("bob"));
+        let view = LobbyView::compose(snapshot, |m| {
+            assert_eq!(m.player, "bob");
+            vec![
+                ad(EndpointKind::Iroh, 2, 60_000, Some(180_000)), // refreshed
+                ad(EndpointKind::Iroh, 1, 0, Some(120_000)),
+                ad(EndpointKind::Direct, 3, 0, None),
+            ]
+        });
         let at = |now| {
             view.live_iroh_endpoints("bob", now)
                 .iter()
@@ -1254,22 +1246,6 @@ mod tests {
     }
 
     #[test]
-    fn action_hash_shape_screen() {
-        let ok = format!("uhCkk{}", "A".repeat(48));
-        assert!(looks_like_action_hash(&ok));
-        for bad in [
-            "",
-            "u",
-            "é",
-            &format!("é{}", "A".repeat(51)),
-            &format!("uhCAk{}", "A".repeat(48)),
-            &format!("uhCkk{}+", "A".repeat(47)),
-        ] {
-            assert!(!looks_like_action_hash(bad), "{bad:?}");
-        }
-    }
-
-    #[test]
     fn paths_and_bands() {
         assert_eq!(lobby_bucket(0), "kart.lobbies.0");
         assert_eq!(lobby_bucket(3_600_000 * 5 + 1), "kart.lobbies.5");
@@ -1286,7 +1262,6 @@ mod tests {
             lobby: "L".into(),
             character_id: "rex".into(),
             invite_code: Some("SECRET-CODE-1".into()),
-            endpoint: None,
         };
         assert!(!format!("{i:?}").contains("SECRET"));
         let c = CreateLobbyInput {
@@ -1298,7 +1273,6 @@ mod tests {
             relay_urls: vec![],
             character_id: "rex".into(),
             invite_code: Some("SECRET-CODE-1".into()),
-            endpoint: None,
         };
         assert!(!format!("{c:?}").contains("SECRET"));
         assert!(!format!("{:?}", InviteProof([1; 64])).contains('1'));

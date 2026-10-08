@@ -14,8 +14,9 @@ pub mod admission;
 pub mod advertisement;
 pub mod capability;
 pub mod endpoint;
-pub mod lobby;
+pub mod hash;
 pub mod peer;
+pub mod presence;
 pub mod session;
 pub mod stream;
 
@@ -29,6 +30,11 @@ pub use endpoint::{
     AgentPubKeyB64, Endpoint, EndpointKind, IrohHints, IrohHintsError, PeerEndpoint,
     TransportIdentity, MAX_IROH_ADDRESS_LEN, MAX_IROH_DIRECT_ADDRS, MAX_IROH_RELAYS,
 };
+pub use hash::{looks_like_action_hash, ActionHashB64, ACTION_HASH_B64_LEN};
 pub use peer::Peer;
+pub use presence::{
+    check_presence, PresenceError, MAX_PRESENCE_TTL_MS, MAX_RECENT_ADS, PRESENCE_REFRESH_MS,
+    PRESENCE_TTL_MS,
+};
 pub use session::{resolve_sessions, Session, SessionError, SessionId, SessionState};
 pub use stream::{Stream, StreamId, StreamKind, StreamLifecycle};

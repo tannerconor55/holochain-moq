@@ -279,6 +279,45 @@ pub fn check_update(
     }
 }
 
+/// Most games a registry listing returns.
+pub const MAX_GAME_LISTING: u32 = 50;
+/// Most releases a registry read returns per game (newest first).
+pub const MAX_RELEASES: usize = 64;
+
+/// `publish_release` input: the release and the game entry it belongs to
+/// (base64 `ActionHash` of the game's registry entry).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishReleaseInput {
+    pub game: String,
+    pub release: GameRelease,
+}
+
+/// A registered game as read back: the first registration of its `game_id`
+/// (by its signed action time) owns the id; later ones are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameView {
+    /// Base64 `ActionHash` of the game's registry entry.
+    pub id: String,
+    pub game: Game,
+    pub registered_at: i64,
+    /// Valid releases by the game's developer, newest version first.
+    pub releases: Vec<GameRelease>,
+}
+
+impl GameView {
+    pub fn latest(&self) -> Option<&GameRelease> {
+        self.releases.first()
+    }
+}
+
+/// One line of the registry listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameSummary {
+    pub id: String,
+    pub game: Game,
+    pub registered_at: i64,
+}
+
 /// Peers can share a session only on the same protocol generation.
 pub fn protocol_compatible(a: u32, b: u32) -> bool {
     a == b
