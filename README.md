@@ -33,7 +33,8 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP6 | Reconnect and recovery: per-peer state machine, 250 ms → 4 s backoff with a 15 s give-up, re-authenticated sessions, self-healing subscriptions (`Latest` resumes at current state, `ReliableOrdered` resumes without gap or duplicate or fails with `HistoryExpired`) | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/mesh`, `crates/mesh-iroh`. **Real Internet / NAT reconnect not tested** |
 | Platform split | `gaming_directory` DNA (identity, presence, game registry) + `turbo_kart` DNA (lobbies, races, results), one agent across both apps | **done, tested on real in-process conductors** - `dna/gaming_directory`, `dna/turbo_kart`, `crates/turbo-kart`, `crates/turbo-kart-client`, `crates/platform`. **Not tested between machines** |
 | WP8 | Realtime membership and access control: race admission from the Turbo Kart lobby + verified presence, roster-only sessions, player tracks read only from their owner, AI only from the host | **done, targeted tests green on real iroh (direct, relay-only) and real conductors** - `crates/turbo-kart-client/src/race.rs`, two guards in `crates/mesh`. Full regression pending (a `mesh` change). **Not tested between machines** |
-| WP9 / WP10 | Hardening and rate limits / Tauri bridge | **not started** |
+| WP9 | Realtime hardening: bounded never-published requests, per-peer subscription cap, reconnect admission rate, receive-side payload/history/group limits, bounded receive buffers | **done, targeted tests green on real iroh** (floods 10x-126x, subscription and early-request floods, churn, refused connections, migration under load) - `crates/mesh-iroh/src/limits.rs`, `crates/mesh`. Full regression pending (combined WP8 + WP9) |
+| WP10 | Tauri bridge | **not started** |
 | Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
@@ -1240,8 +1241,62 @@ cargo test -p holochain-moq-e2e --test lobby -- --test-threads=1 --nocapture  # 
   a new admission.
 - **Peers read every member's tracks.** Authorization is per race and per source, not per
   track type; there are no private tracks inside a race.
-- **No rate limits (WP9):** a refused endpoint may redial (each attempt costs it a full
-  QUIC handshake and is refused before any MoQ session); a *member* may still request
-  unbounded never-published track names (queued in moq-net).
+- **Rate limits are WP9's** (see below).
+- **No real Internet / NAT / multi-machine validation.**
+
+## WP9: realtime hardening and resource limits
+
+Application-level resource controls for an *admitted* roster member: what a peer can make
+an endpoint allocate, queue, hold or redo. **Not** DDoS or Internet-scale abuse protection,
+and not anti-cheat. Non-members never get a MoQ session (WP2/WP8).
+
+| Limit | Value | Enforced where | On exceed | Scope |
+|---|---|---|---|---|
+| `Latest` payload | 1024 B | send: `mesh` `TrackPublisher::send`; receive: `mesh-iroh` reader | send `PayloadTooLarge`; receive dropped, counted `oversized` | per object |
+| `ReliableOrdered` payload | 4096 B | send: `mesh`; receive: `mesh-iroh` reader | send `PayloadTooLarge`; receive `MeshError::LimitExceeded` (sticky) | per object |
+| Reliable history | 16 384 objects, 1 MiB | send: `mesh` (`HistoryFull`); receive: `mesh-iroh` reader | send refused; receive `LimitExceeded` | per source track, per race |
+| Reliable group | 64 objects | receive: `mesh-iroh` reader | `LimitExceeded` | per group |
+| Out-of-order reliable groups held | 8 | receive: `mesh-iroh` reader (WP6) | `HistoryExpired` | per subscription |
+| Undelivered objects | `Latest` 4 (drop oldest), reliable 1024 (backpressure) | `mesh-iroh` reader (WP3) | dropped / sender blocked | per subscription |
+| Race id / source / track name | 32 / 64 / 64 B, fixed alphabets, no empty, `.`, `..` component | `mesh` types | `InvalidRaceId` / `InvalidSource` / `InvalidTrackName` | per name |
+| Never-published track requests held | 32 | `mesh-iroh` early server | refused (`NotFound`); invalid names always refused; abandoned ones swept | per broadcast (source) |
+| Live subscriptions to this endpoint | 128 | `mesh-iroh` watchdog (moq-net stats, every 250 ms) | session closed, code 0x4d10 | per remote agent |
+| Incoming links (reconnects) | burst 16, then 4/s | `mesh` admission | `RejectReason::RateLimited` (0x4d05) | per roster agent |
+| Unread received data | 16 MiB | QUIC connection receive window | sender blocked | per connection |
+| Received-group cache | 16 MiB target | per-session subscribe origin | oldest evicted | per session |
+| Publish cache | 64 MiB target (WP6) | publish origin | oldest evicted | per endpoint |
+| QUIC streams | 4096 uni / 256 bidi (WP3) | QUIC | sender blocked | per connection |
+| Frame / group (library) | 32 MiB, 8192 frames, checked before allocating | moq-net | stream aborted | per frame / group |
+| Wire messages | `KartState` exactly 42 B; event payload ≤ 1024, track id ≤ 32, grid ≤ 8; AI payload ≤ 1015, agent ≤ 64; clock fixed lengths | `kart-wire`, `host::wire`, `clock::wire` decoders (WP3–WP5) | decode error, message dropped and counted | per message |
+
+```bash
+cargo test -p holochain-moq-mesh-iroh --test hardening -- --test-threads=1 --nocapture  # floods, caps, churn
+cargo test -p holochain-moq-host --test load -- --nocapture                             # migration under a state flood
+```
+
+| Measured (loopback, dev machine) | Result |
+|---|---|
+| `Latest` flood 16x / 126x 30 Hz from a member, victim not reading | victim queue ≤ 4, no task growth, honest 30 Hz peer 91 of 91 |
+| 5000 never-published track names requested | 32 held, 4969 refused; an honest early subscription made before the flood still served |
+| 168 live subscriptions from one peer | session closed (0x4d10) after ~2.3 s; honest traffic unaffected |
+| 60 re-dials by a member in 0.26 s | 16 admitted (bound 19), 44 `RateLimited` |
+| 100 dials by a non-member | 100 `NotMember`, no task growth |
+| reliable object > 4 KiB / object 16 385 | subscription fails `LimitExceeded` (after exactly 16 384 delivered) |
+| host partition during a ~46x state flood | migration in ~1.0 s, old host stepped down at ~3.0 s, deposed host refused AI |
+
+### Known limitations (WP9)
+
+- **A flooding member can exhaust another member's early-request table** (32 names per
+  broadcast): later *subscribe-before-publish* requests to that publisher are refused while
+  the flood's subscriptions stay alive. Tracks that exist are unaffected.
+- **No `Latest` receive rate limit.** Memory is bounded (queue of 4, newest wins) and the
+  per-object cost is constant; a limiter that keeps newest-wins can only act when the reader
+  is behind, which the queue already handles. A flood costs the receiver CPU in proportion
+  to the sender's bandwidth.
+- **Subscription counting is sampled** (every 250 ms), so a peer can briefly exceed 128.
+- **Process-wide RSS in the tests includes the attacker** (same process); the per-endpoint
+  bounds are shown by counters.
+- **Not tested end to end:** a raw MoQ peer sending invalid track names or a >64-object
+  reliable group (the code paths exist; the mesh API cannot produce them).
 - **No real Internet / NAT / multi-machine validation.**
 

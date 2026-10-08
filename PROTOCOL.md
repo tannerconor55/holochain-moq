@@ -1277,3 +1277,40 @@ enforced by the existing mesh link checks.
 Limits: ≤ 8 humans (`MAX_RACE_HUMANS`), grid ≤ 8 (`MAX_GRID`), `race_id` ≤ 32, source ≤ 64,
 track ≤ 64. Peers see only the mesh's close codes (`RejectReason`), never roster details.
 
+## WP9 resource limits
+
+No wire change. Receivers enforce the delivery contract on what they are sent; the close
+codes below are QUIC application close codes.
+
+| Limit | Value | Enforced where | On exceed | Scope |
+|---|---|---|---|---|
+| `Latest` payload | 1024 B | send: `mesh` `TrackPublisher::send`; receive: `mesh-iroh` reader | send `PayloadTooLarge`; receive dropped, counted `oversized` | per object |
+| `ReliableOrdered` payload | 4096 B | send: `mesh`; receive: `mesh-iroh` reader | send `PayloadTooLarge`; receive `MeshError::LimitExceeded` (sticky) | per object |
+| Reliable history | 16 384 objects, 1 MiB | send: `mesh` (`HistoryFull`); receive: `mesh-iroh` reader | send refused; receive `LimitExceeded` | per source track, per race |
+| Reliable group | 64 objects | receive: `mesh-iroh` reader | `LimitExceeded` | per group |
+| Out-of-order reliable groups held | 8 | receive: `mesh-iroh` reader (WP6) | `HistoryExpired` | per subscription |
+| Undelivered objects | `Latest` 4 (drop oldest), reliable 1024 (backpressure) | `mesh-iroh` reader (WP3) | dropped / sender blocked | per subscription |
+| Race id / source / track name | 32 / 64 / 64 B, fixed alphabets, no empty, `.`, `..` component | `mesh` types | `InvalidRaceId` / `InvalidSource` / `InvalidTrackName` | per name |
+| Never-published track requests held | 32 | `mesh-iroh` early server | refused (`NotFound`); invalid names always refused; abandoned ones swept | per broadcast (source) |
+| Live subscriptions to this endpoint | 128 | `mesh-iroh` watchdog (moq-net stats, every 250 ms) | session closed, code 0x4d10 | per remote agent |
+| Incoming links (reconnects) | burst 16, then 4/s | `mesh` admission | `RejectReason::RateLimited` (0x4d05) | per roster agent |
+| Unread received data | 16 MiB | QUIC connection receive window | sender blocked | per connection |
+| Received-group cache | 16 MiB target | per-session subscribe origin | oldest evicted | per session |
+| Publish cache | 64 MiB target (WP6) | publish origin | oldest evicted | per endpoint |
+| QUIC streams | 4096 uni / 256 bidi (WP3) | QUIC | sender blocked | per connection |
+| Frame / group (library) | 32 MiB, 8192 frames, checked before allocating | moq-net | stream aborted | per frame / group |
+| Wire messages | `KartState` exactly 42 B; event payload ≤ 1024, track id ≤ 32, grid ≤ 8; AI payload ≤ 1015, agent ≤ 64; clock fixed lengths | `kart-wire`, `host::wire`, `clock::wire` decoders (WP3–WP5) | decode error, message dropped and counted | per message |
+
+| Code | Meaning |
+|---|---|
+| 0x4d01 | `NotMember` |
+| 0x4d02 | `IdentityMismatch` |
+| 0x4d03 | `WrongDirection` |
+| 0x4d04 | `Duplicate` |
+| 0x4d05 | `RateLimited` (WP9): a member re-linking faster than burst 16 + 4/s |
+| 0x4d10 | resource limit (WP9): more than 128 live subscriptions from one peer |
+
+Errors surfaced to the application: `MeshError::LimitExceeded(reason)` (sticky, per
+subscription), `MeshError::PayloadTooLarge`, `MeshError::HistoryFull` (sender), and the
+counters `SubscriptionStats::oversized` and `IrohMeshTransport::limit_stats()`.
+

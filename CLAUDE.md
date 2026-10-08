@@ -82,6 +82,8 @@ These are hard constraints unless a task explicitly changes them.
 
 23. **Authentication ≠ authorization (WP8).** An authenticated iroh peer is not automatically authorized for a race: the roster comes only from `RaceAdmission` (admitted lobby members × directory-verified EndpointIds), snapshotted at setup and cached for the race. A player's tracks are read only from that player's session; AI only from the current host. Holochain is consulted at session/control-plane boundaries, never once per realtime game object.
 
+24. **Realtime resources are bounded per object, peer, session and broadcast (WP9).** Anything a remote can make an endpoint hold has a documented limit enforced by the receiver (see ARCHITECTURE.md "Realtime hardening (WP9)"). These are application-level controls, not DDoS protection; never enforce them through Holochain.
+
 ## Current architecture
 
 ```text
