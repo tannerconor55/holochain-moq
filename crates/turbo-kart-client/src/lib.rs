@@ -20,7 +20,7 @@ use holochain_moq_hdk_bridge::{
     call_zome, parse_action_hash, ConductorConfig, HolochainPeerDirectory, ZomeCaller,
 };
 use holochain_moq_node::DirectoryError;
-use holochain_moq_protocol::{AgentPubKeyB64, EndpointAdvertisement};
+use holochain_moq_protocol::{AgentPubKeyB64, SignedPresence};
 use holochain_moq_turbo_kart::{
     self as kart, CreateLobbyInput, JoinLobbyInput, LeaderboardEntry, LeaderboardInput, Lobby,
     LobbyAccess, LobbyError, LobbyId, LobbySnapshot, LobbyStatus, LobbySummary, LobbyView,
@@ -114,10 +114,9 @@ impl TurboKartClient {
     }
 
     /// Publish presence (to the gaming directory) if given, after checking it.
-    async fn presence(&self, presence: Option<EndpointAdvertisement>) -> Result<(), KartError> {
-        if let Some(ad) = presence {
-            self.directory.check_own_presence(&ad)?;
-            self.directory.publish_endpoint_advertisement(ad).await?;
+    async fn presence(&self, presence: Option<SignedPresence>) -> Result<(), KartError> {
+        if let Some(p) = presence {
+            self.directory.publish_signed_presence(p).await?;
         }
         Ok(())
     }
@@ -128,7 +127,7 @@ impl TurboKartClient {
     pub async fn create_lobby(
         &self,
         input: CreateLobbyInput,
-        presence: Option<EndpointAdvertisement>,
+        presence: Option<SignedPresence>,
     ) -> Result<LobbyId, KartError> {
         Lobby {
             name: input.name.clone(),
@@ -152,8 +151,8 @@ impl TurboKartClient {
             kart::invite_access([0; kart::INVITE_SALT_LEN], code)
                 .map_err(KartError::InvalidRecord)?;
         }
-        if let Some(ad) = &presence {
-            self.directory.check_own_presence(ad)?;
+        if let Some(p) = &presence {
+            self.directory.check_own_presence(&p.advertisement)?;
         }
         self.presence(presence).await?;
         self.call_for_id("create_lobby", &input).await
@@ -181,7 +180,7 @@ impl TurboKartClient {
     pub async fn join_lobby(
         &self,
         input: JoinLobbyInput,
-        presence: Option<EndpointAdvertisement>,
+        presence: Option<SignedPresence>,
     ) -> Result<LobbyId, KartError> {
         if !kart::is_character(&input.character_id) {
             return Err(KartError::InvalidRecord(LobbyError::Character(
@@ -189,8 +188,8 @@ impl TurboKartClient {
             )));
         }
         parse_action_hash(&input.lobby, "join_lobby")?;
-        if let Some(ad) = &presence {
-            self.directory.check_own_presence(ad)?;
+        if let Some(p) = &presence {
+            self.directory.check_own_presence(&p.advertisement)?;
         }
         self.presence(presence).await?;
         self.call_for_id("join_lobby", &input).await
