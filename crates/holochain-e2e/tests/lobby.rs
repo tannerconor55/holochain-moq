@@ -352,6 +352,33 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
     }
     assert!(ai_frames > 0, "Bob received AI frames from host Alice");
 
+    // WP6: a forced transport loss mid-race. The mesh reconnects on its own,
+    // re-authenticating the same EndpointIds from the roster it already has;
+    // reliable events resume with no gap. Still no Holochain call.
+    assert!(am.sever(&bob), "severed Alice's session with Bob");
+    let (_, reconnect) = until("the pair to reconnect", || {
+        let ok = am.connection_count() == 1
+            && bm.connection_count() == 1
+            && bm.peers()[0].reconnect.successes == 1;
+        async move { ok.then_some(()) }
+    })
+    .await;
+    for k in 1..=10u32 {
+        a_events.send(format!("after {k}")).unwrap();
+    }
+    for k in 1..=10u32 {
+        let e = tokio::time::timeout(Duration::from_secs(5), b_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e,
+            format!("after {k}").into_bytes(),
+            "no gap or duplicate after the reconnect"
+        );
+    }
+
     // The host leaves mid-race: Bob detects it, is elected and takes over AI.
     ah.shutdown();
     drop(ah);
@@ -374,7 +401,7 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
             bcalls.load(Ordering::SeqCst) - b0
         ),
         (0, 0),
-        "zero Holochain calls during kart state, events, AI, heartbeats, election and migration"
+        "zero Holochain calls during kart state, events, AI, heartbeats, a forced reconnect, election and migration"
     );
     let window_ms = ms(window.elapsed());
 
@@ -419,10 +446,11 @@ async fn two_conductors_create_discover_join_observe_and_race_with_zero_holochai
          join observed by Alice {:.0} ms, get_lobby {get_ms:.1} ms, publish_result {result_ms:.1} ms, \
          result on Alice's leaderboard {:.0} ms, get_leaderboard {board_ms:.1} ms; \
          steady-state window {window_ms:.0} ms ({sent} ticks, {ai_frames} AI frames seen, \
-         host migration {:.0} ms) with 0 Holochain calls",
+         forced reconnect {:.0} ms, host migration {:.0} ms) with 0 Holochain calls",
         ms(discover),
         ms(observe),
         ms(board_prop),
+        ms(reconnect),
         ms(migrate)
     );
 }
