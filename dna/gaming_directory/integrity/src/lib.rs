@@ -12,17 +12,26 @@
 //! carries realtime payload, and knows nothing about MoQ/QUIC beyond the
 //! durable `holochain_moq_protocol` types it stores.
 //!
-//! The one job of validation here is the identity binding: an entry that
+//! The main job of validation here is the identity binding: an entry that
 //! names an agent (`PeerEndpoint::agent`, `Stream::owner`, `Peer::agent`) is
 //! only valid if that agent is the action's actual author. Every Holochain
 //! action is signed by its author, so authorship *is* the claim "this
-//! transport identity/stream belongs to this agent". Live TLS verification
-//! of the transport identity is not this zome's job (`crates/realtime`).
+//! transport identity/stream belongs to this agent". An iroh endpoint must
+//! additionally be signed by the EndpointId itself (proof of possession,
+//! `protocol::presence`), so nobody can advertise an EndpointId they do not
+//! hold. Live TLS verification of the transport identity is not this zome's
+//! job (`crates/realtime`).
+//!
+//! Registry governance (`holochain_moq_platform` docs): a game is
+//! `(developer, game_id)`; a developer registers each id once; releases form
+//! one strictly-newer chain per game. Both checked from the author's own chain
+//! (`must_get_agent_activity`), never from timestamps or other agents' data.
 
 use hdi::prelude::*;
-use holochain_moq_platform::{Game, GameRelease};
+use holochain_moq_platform::{check_successor, Game, GameRelease};
 use holochain_moq_protocol::{
-    AgentPubKeyB64, Capability, EndpointAdvertisement, PeerEndpoint, Session, Stream,
+    iroh_binding_payload, AgentPubKeyB64, BindingSignature, Capability, EndpointAdvertisement,
+    EndpointKind, PeerEndpoint, Session, Stream,
 };
 
 /// Durable peer metadata. Endpoints are separate entries (`PeerEndpointEntry`)
@@ -42,7 +51,8 @@ pub struct Peer {
 /// action's author. Also carries the advertisement freshness
 /// (`protocol::EndpointAdvertisement`): `published_at` and an optional
 /// `expires_at`, both ms since epoch. Expiry is only ever evaluated by
-/// readers; it never mutates the DHT.
+/// readers; it never mutates the DHT. An iroh endpoint also carries its
+/// EndpointId's signature over `protocol::iroh_binding_payload(id, agent)`.
 #[hdk_entry_helper]
 #[derive(Clone, PartialEq)]
 pub struct PeerEndpointEntry {
@@ -51,6 +61,8 @@ pub struct PeerEndpointEntry {
     pub published_at: i64,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub binding_signature: Option<BindingSignature>,
 }
 
 impl PeerEndpointEntry {
@@ -92,11 +104,15 @@ pub struct GameEntry {
 
 /// One release of a registered game. `game` is the `ActionHash` (base64) of
 /// the game's registry entry; only that entry's author (the developer) may
-/// publish releases for it, and `release.game_id` must match it.
+/// publish releases for it, and `release.game_id` must match it. `previous`
+/// is the release it follows (base64 `ActionHash`), or `game` itself for the
+/// first release: the releases of a game form one chain on the developer's
+/// source chain, each strictly newer than the last.
 #[hdk_entry_helper]
 #[derive(Clone, PartialEq)]
 pub struct GameReleaseEntry {
     pub game: String,
+    pub previous: String,
     pub release: GameRelease,
 }
 
@@ -129,7 +145,8 @@ pub enum LinkTypes {
     AllSessions,
     /// Typed-path plumbing required by `TypedPath`.
     Anchor,
-    /// path(`platform.game.<game_id>`) -> `GameEntry` (lookup by game id)
+    /// path(`platform.game.<game_id>`) -> `GameEntry` (lookup by game id),
+    /// tagged with the developer's raw key bytes (lookup by developer)
     GameIdToGame,
     /// path(`platform.games`) -> every `GameEntry` (listing)
     AllGames,
@@ -160,12 +177,14 @@ fn require_author(
     }
 }
 
-/// Entry validation: the claimed agent must be the action's author. Comes
-/// entirely from the op itself - no DHT reads.
+/// Entry validation: the claimed agent must be the action's author. Identity
+/// records come from the op itself; registry records also read their
+/// referenced entries and the author's earlier chain, deterministically.
 fn validate_entry(
-    author: &AgentPubKey,
+    action: &TypedAction<CreateData>,
     entry: &EntryTypes,
 ) -> ExternResult<ValidateCallbackResult> {
+    let author = action.author();
     match entry {
         EntryTypes::Peer(p) => require_author(author, &p.agent, "Peer"),
         EntryTypes::PeerEndpointEntry(e) => {
@@ -177,6 +196,13 @@ fn validate_entry(
             // Presence: an iroh endpoint must state a bounded expiry.
             if let Err(err) = holochain_moq_protocol::check_presence(&e.advertisement()) {
                 return invalid(format!("PeerEndpoint advertisement: {err}"));
+            }
+            if e.peer_endpoint.endpoint.kind == EndpointKind::Iroh && !iroh_binding_verifies(e) {
+                return invalid(format!(
+                    "PeerEndpoint: iroh EndpointId {} did not sign its binding to {}",
+                    e.peer_endpoint.endpoint.transport_identity.to_hex(),
+                    e.peer_endpoint.agent
+                ));
             }
             require_author(author, &e.peer_endpoint.agent, "PeerEndpoint")
         }
@@ -191,7 +217,22 @@ fn validate_entry(
             if let Err(err) = e.game.validate() {
                 return invalid(format!("Game: {err}"));
             }
-            require_author(author, &e.game.developer, "Game")
+            let owner = require_author(author, &e.game.developer, "Game")?;
+            if owner != ValidateCallbackResult::Valid {
+                return Ok(owner);
+            }
+            // One registration per (developer, game_id): none earlier on this chain.
+            for (_, earlier) in earlier_on_chain(action, None, UnitEntryTypes::GameEntry)? {
+                if let EntryTypes::GameEntry(g) = earlier {
+                    if g.game.game_id == e.game.game_id {
+                        return invalid(format!(
+                            "Game: {author} already registered {:?}",
+                            e.game.game_id
+                        ));
+                    }
+                }
+            }
+            Ok(ValidateCallbackResult::Valid)
         }
         EntryTypes::GameReleaseEntry(e) => {
             if let Err(err) = e.release.validate() {
@@ -213,13 +254,127 @@ fn validate_entry(
                     e.release.game_id, game.game_id
                 ));
             }
-            Ok(ValidateCallbackResult::Valid)
+            if e.release.dna_hash == dna_info()?.hash.to_string() {
+                return invalid(
+                    "GameRelease: a game's DNA cannot be the gaming directory itself".into(),
+                );
+            }
+            validate_release_chain(action, e)
         }
     }
 }
 
 fn invalid(why: String) -> ExternResult<ValidateCallbackResult> {
     Ok(ValidateCallbackResult::Invalid(why))
+}
+
+/// Whether an iroh endpoint entry carries its EndpointId's valid Ed25519
+/// signature over the binding to the named agent. An EndpointId is an
+/// Ed25519 public key, so it verifies like an agent key.
+fn iroh_binding_verifies(e: &PeerEndpointEntry) -> bool {
+    let Some(sig) = e.binding_signature else {
+        return false;
+    };
+    let endpoint_id = &e.peer_endpoint.endpoint.transport_identity.fingerprint;
+    let key = AgentPubKey::from_raw_32(endpoint_id.to_vec());
+    let payload = iroh_binding_payload(endpoint_id, &e.peer_endpoint.agent);
+    // A malformed EndpointId (not an Ed25519 point) cannot verify: an error
+    // from the host counts as "does not verify".
+    matches!(
+        verify_signature_raw(key, Signature(sig.to_bytes()), payload.into()),
+        Ok(true)
+    )
+}
+
+/// The `want`-typed entries of this zome the author committed before
+/// `action`, newest first: back to genesis, or back to (excluding) `stop`.
+/// A deterministic read of the author's own chain (`must_get_agent_activity`
+/// is hash-bounded); its cost grows with that stretch of chain.
+fn earlier_on_chain(
+    action: &TypedAction<CreateData>,
+    stop: Option<ActionHash>,
+    want: UnitEntryTypes,
+) -> ExternResult<Vec<(ActionHash, EntryTypes)>> {
+    let Some(prev) = action.header.prev_action.clone() else {
+        return Ok(vec![]);
+    };
+    let filter = match &stop {
+        Some(h) => ChainFilter::until_hash(prev, h.clone()),
+        None => ChainFilter::new(prev),
+    };
+    let want = ScopedEntryDefIndex::try_from(want)?;
+    let mut out = Vec::new();
+    for a in must_get_agent_activity(action.author().clone(), filter)? {
+        let hash = a.action.hashed.hash.clone();
+        if stop.as_ref() == Some(&hash) {
+            continue;
+        }
+        let content = &a.action.hashed.content;
+        let (Some(EntryType::App(def)), Some(entry_hash)) =
+            (content.entry_type(), content.entry_hash())
+        else {
+            continue;
+        };
+        if def.zome_index != want.zome_index || def.entry_index != want.zome_type {
+            continue;
+        }
+        let entry = match a.cached_entry {
+            Some(e) => e,
+            None => must_get_entry(entry_hash.clone())?.content,
+        };
+        if let Some(e) = EntryTypes::deserialize_from_type(def.zome_index, def.entry_index, &entry)?
+        {
+            out.push((hash, e));
+        }
+    }
+    Ok(out)
+}
+
+/// A release follows its `previous` (the game entry for the first one):
+/// same author, same game, strictly newer and no protocol rollback
+/// (`check_successor`), with no other release of the game between the two on
+/// the author's chain. So a game's releases are one linear chain: no version
+/// is published twice and none is lower than one before it.
+fn validate_release_chain(
+    action: &TypedAction<CreateData>,
+    e: &GameReleaseEntry,
+) -> ExternResult<ValidateCallbackResult> {
+    let Some(prev_hash) = parse_action_hash(&e.previous) else {
+        return invalid(format!(
+            "GameRelease: previous {:?} is not an action hash",
+            e.previous
+        ));
+    };
+    let prev = must_get_valid_record(prev_hash.clone())?;
+    if prev.action().author() != action.author() {
+        return invalid("GameRelease: previous release is by a different author".into());
+    }
+    if e.previous != e.game {
+        match record_entry(&prev)? {
+            Some(EntryTypes::GameReleaseEntry(p)) if p.game == e.game => {
+                if let Err(err) = check_successor(&p.release, &e.release) {
+                    return invalid(format!("GameRelease: {err}"));
+                }
+            }
+            _ => {
+                return invalid(format!(
+                    "GameRelease: previous {} is not a release of this game",
+                    e.previous
+                ))
+            }
+        }
+    }
+    for (h, other) in earlier_on_chain(action, Some(prev_hash), UnitEntryTypes::GameReleaseEntry)? {
+        if let EntryTypes::GameReleaseEntry(o) = other {
+            if o.game == e.game {
+                return invalid(format!(
+                    "GameRelease: release {h} of this game comes after {}; a release must follow the latest one",
+                    e.previous
+                ));
+            }
+        }
+    }
+    Ok(ValidateCallbackResult::Valid)
 }
 
 /// Parse a base64 `ActionHash`, accepting only its canonical text form.
@@ -263,6 +418,12 @@ pub fn game_path(game_id: &str) -> String {
 
 /// Path of the registry listing.
 pub const ALL_GAMES_PATH: &str = "platform.games";
+
+/// Tag of a `GameIdToGame` link: the developer's raw key bytes, so a lookup
+/// by `(developer, game_id)` reads only that developer's registration.
+pub fn developer_tag(developer: &AgentPubKey) -> LinkTag {
+    LinkTag::new(developer.get_raw_39().to_vec())
+}
 
 /// Link validation. `Agent*` links must hang off the author's own agent key
 /// (so nobody can attach bogus endpoints/streams to someone else's agent),
@@ -347,6 +508,7 @@ fn validate_registry_link(
             base == Path::from(game_path(&e.game.game_id))
                 .path_entry_hash()?
                 .into()
+                && action.tag.0 == developer_tag(record.action().author()).0
         }
         (LinkTypes::AllGames, Some(EntryTypes::GameEntry(_))) => {
             base == Path::from(ALL_GAMES_PATH).path_entry_hash()?.into()
@@ -367,7 +529,7 @@ fn validate_registry_link(
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
         FlatOp::CreateEntry(OpEntry::CreateEntry { app_entry, action }) => {
-            validate_entry(action.author(), &app_entry)
+            validate_entry(&action, &app_entry)
         }
         FlatOp::CreateEntry(_) => Ok(ValidateCallbackResult::Valid),
         FlatOp::Link(OpLink::CreateLink { link_type, action }) => match link_type {

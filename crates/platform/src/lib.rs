@@ -1,24 +1,34 @@
 //! Gaming platform: game identity and release metadata (shared, game-neutral).
 //!
-//! Kept out of `crates/protocol` on purpose: that crate is compiled into the
-//! current integrity zome, and adding even unused code to it changed the DNA
-//! hash. These types join a DNA only with the planned `gaming_directory`.
+//! Compiled into the `gaming_directory` integrity zome (and only that one), so
+//! any change here changes the directory DNA hash. See ARCHITECTURE.md
+//! "Gaming platform registry and governance".
 //!
-//! The record shapes and rules a future Gaming Registry (in the planned shared
-//! `gaming_directory` DNA) and the Gaming Hub will use. **Not stored in any DNA
-//! yet**: this module only fixes the contract and its validation, so the Hub,
-//! the registry zome and release tooling agree on it. See ARCHITECTURE.md
-//! "Gaming hApp / Multi-Game Architecture".
+//! # Governance
+//!
+//! * **A game is `(developer, game_id)`** ([`GameKey`]). Anyone may register a
+//!   game, under their own key only (the registry entry is authored by
+//!   `developer`). The DNA cannot decide a *global* first registration
+//!   deterministically: validation sees only the op and what it `must_get`s,
+//!   and action timestamps are author-chosen (Holochain 0.7 only checks they
+//!   increase along each chain), so "earliest wins" could be backdated. Two
+//!   developers using the same `game_id` are therefore two different games;
+//!   readers never merge or rank them, and the Hub pins the developer key.
+//! * **Conflicting registration** (the same developer registering a `game_id`
+//!   again) is rejected by validation, from the developer's own chain.
+//! * **Releases** are authored by the game's developer only and form one chain
+//!   per game: each names its predecessor (the game entry for the first), is
+//!   strictly newer ([`check_successor`]: no duplicate version, no downgrade,
+//!   no protocol rollback), and nothing else of that game sits between them
+//!   on the developer's chain. Entries are append-only: nothing is replaced.
 //!
 //! # Trust model
 //!
 //! A download source provides bytes; cryptographic verification determines
 //! whether those bytes are the expected release.
 //!
-//! * A [`Game`] names its `developer` (an `AgentPubKeyB64`); the registry entry
-//!   must be authored by that key, as every agent-named record in this DNA is.
-//! * A [`GameRelease`] is valid only if authored by that same developer key, so
-//!   the Holochain action signature *is* the release signature: no second
+//! * A [`GameRelease`] is valid only if authored by the game's developer key,
+//!   so the Holochain action signature *is* the release signature: no second
 //!   signing scheme.
 //! * Each [`ReleaseArtifact`] pins its content by SHA-256 and size; the Hub
 //!   hashes what it downloaded, from wherever, and installs only on a match.
@@ -89,7 +99,9 @@ pub enum Platform {
     MacosAarch64,
 }
 
-/// `major.minor.patch`. Ordered; the Hub never installs a lower one.
+/// `major.minor.patch`, each a decimal `u16` without sign or padding beyond
+/// 5 digits. Ordered; the Hub never installs a lower one. `0.0.0` is not a
+/// release version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Version {
     pub major: u16,
@@ -113,13 +125,22 @@ impl Version {
     }
 }
 
+impl Version {
+    pub const ZERO: Self = Self {
+        major: 0,
+        minor: 0,
+        patch: 0,
+    };
+}
+
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
     }
 }
 
-/// A game's identity in the registry. Authored by `developer`.
+/// A game's identity in the registry. Authored by `developer`. Immutable:
+/// registry entries are append-only and never updated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
     pub game_id: String,
@@ -158,11 +179,41 @@ pub struct GameRelease {
     pub artifacts: Vec<ReleaseArtifact>,
 }
 
+/// What identifies a registered game: the developer key and its `game_id`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GameKey {
+    pub developer: AgentPubKeyB64,
+    pub game_id: String,
+}
+
+impl Game {
+    pub fn key(&self) -> GameKey {
+        GameKey {
+            developer: self.developer.clone(),
+            game_id: self.game_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseError {
     GameId(String),
     Name,
     DnaHash(String),
+    /// `0.0.0`.
+    ZeroVersion,
+    /// `protocol_version` 0.
+    ProtocolVersion,
+    /// A release that is not strictly newer than its predecessor.
+    NotNewer {
+        previous: Version,
+        candidate: Version,
+    },
+    /// A release with a lower `protocol_version` than its predecessor.
+    ProtocolRollback {
+        previous: u32,
+        candidate: u32,
+    },
     NoArtifacts,
     TooManyArtifacts(usize),
     DuplicatePlatform(Platform),
@@ -185,6 +236,22 @@ impl fmt::Display for ReleaseError {
                 "game name must be 1-{MAX_GAME_NAME_CHARS} characters without control characters"
             ),
             Self::DnaHash(h) => write!(f, "{h:?} is not a DNA hash"),
+            Self::ZeroVersion => write!(f, "0.0.0 is not a release version"),
+            Self::ProtocolVersion => write!(f, "protocol_version must be at least 1"),
+            Self::NotNewer {
+                previous,
+                candidate,
+            } => write!(
+                f,
+                "release {candidate} is not newer than the previous release {previous}"
+            ),
+            Self::ProtocolRollback {
+                previous,
+                candidate,
+            } => write!(
+                f,
+                "protocol_version {candidate} is lower than the previous release's {previous}"
+            ),
             Self::NoArtifacts => write!(f, "a release needs at least one artifact"),
             Self::TooManyArtifacts(n) => write!(f, "{n} artifacts, at most {MAX_ARTIFACTS}"),
             Self::DuplicatePlatform(p) => write!(f, "two artifacts for {p:?}"),
@@ -225,6 +292,12 @@ impl GameRelease {
         if !valid_game_id(&self.game_id) {
             return Err(ReleaseError::GameId(self.game_id.clone()));
         }
+        if self.version == Version::ZERO {
+            return Err(ReleaseError::ZeroVersion);
+        }
+        if self.protocol_version == 0 {
+            return Err(ReleaseError::ProtocolVersion);
+        }
         if !looks_like_dna_hash(&self.dna_hash) {
             return Err(ReleaseError::DnaHash(self.dna_hash.clone()));
         }
@@ -251,6 +324,30 @@ impl GameRelease {
     pub fn artifact_for(&self, platform: Platform) -> Option<&ReleaseArtifact> {
         self.artifacts.iter().find(|a| a.platform == platform)
     }
+}
+
+/// Whether `next` may follow `previous` in a game's release chain (the
+/// registry rule): both valid, same game, strictly newer version, and a
+/// `protocol_version` no lower. So a version number is never published twice
+/// and the newest release is always the highest version.
+pub fn check_successor(previous: &GameRelease, next: &GameRelease) -> Result<(), ReleaseError> {
+    next.validate()?;
+    if previous.game_id != next.game_id {
+        return Err(ReleaseError::OtherGame);
+    }
+    if next.version <= previous.version {
+        return Err(ReleaseError::NotNewer {
+            previous: previous.version,
+            candidate: next.version,
+        });
+    }
+    if next.protocol_version < previous.protocol_version {
+        return Err(ReleaseError::ProtocolRollback {
+            previous: previous.protocol_version,
+            candidate: next.protocol_version,
+        });
+    }
+    Ok(())
 }
 
 /// Whether the Hub may install `candidate` over what is `installed`: same
@@ -283,39 +380,54 @@ pub fn check_update(
 pub const MAX_GAME_LISTING: u32 = 50;
 /// Most releases a registry read returns per game (newest first).
 pub const MAX_RELEASES: usize = 64;
+/// Most registrations of one `game_id` (by different developers) a lookup returns.
+pub const MAX_GAME_CLAIMS: usize = 16;
 
 /// `publish_release` input: the release and the game entry it belongs to
-/// (base64 `ActionHash` of the game's registry entry).
+/// (base64 `ActionHash` of the game's registry entry). The coordinator finds
+/// the predecessor on the developer's own chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishReleaseInput {
     pub game: String,
     pub release: GameRelease,
 }
 
-/// A registered game as read back: the first registration of its `game_id`
-/// (by its signed action time) owns the id; later ones are ignored.
+/// A registered game as read back: the developer's registration of
+/// `game.game_id` and its release chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameView {
     /// Base64 `ActionHash` of the game's registry entry.
     pub id: String,
     pub game: Game,
+    /// Author-stated time of the registration (informational only; it decides nothing).
     pub registered_at: i64,
-    /// Valid releases by the game's developer, newest version first.
+    /// The developer's releases, newest version first.
     pub releases: Vec<GameRelease>,
 }
 
 impl GameView {
+    pub fn key(&self) -> GameKey {
+        self.game.key()
+    }
+
     pub fn latest(&self) -> Option<&GameRelease> {
         self.releases.first()
     }
 }
 
-/// One line of the registry listing.
+/// One line of a registry listing or `game_id` lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSummary {
     pub id: String,
     pub game: Game,
+    /// Author-stated time of the registration (informational only).
     pub registered_at: i64,
+}
+
+impl GameSummary {
+    pub fn key(&self) -> GameKey {
+        self.game.key()
+    }
 }
 
 /// Peers can share a session only on the same protocol generation.
@@ -505,5 +617,62 @@ mod tests {
         assert!(!a.matches(&[3; 32], 10_000));
         assert!(r.artifact_for(Platform::WindowsX86_64).is_none());
         assert!(protocol_compatible(1, 1) && !protocol_compatible(1, 2));
+    }
+
+    #[test]
+    fn releases_need_a_real_version_and_protocol() {
+        let mut r = release("1.0.0");
+        r.version = Version::ZERO;
+        assert_eq!(r.validate(), Err(ReleaseError::ZeroVersion));
+        let mut r = release("1.0.0");
+        r.protocol_version = 0;
+        assert_eq!(r.validate(), Err(ReleaseError::ProtocolVersion));
+        release("0.0.1").validate().unwrap();
+    }
+
+    #[test]
+    fn a_release_chain_only_moves_forward() {
+        let v1 = release("1.0.0");
+        check_successor(&v1, &release("1.0.1")).unwrap();
+        check_successor(&v1, &release("2.0.0")).unwrap();
+        // The same version again, even with identical content, is not a successor.
+        assert!(matches!(
+            check_successor(&v1, &v1),
+            Err(ReleaseError::NotNewer { .. })
+        ));
+        assert!(matches!(
+            check_successor(&release("1.2.0"), &release("1.1.9")),
+            Err(ReleaseError::NotNewer { .. })
+        ));
+        let mut newer_protocol = release("1.1.0");
+        newer_protocol.protocol_version = 2;
+        check_successor(&v1, &newer_protocol).unwrap();
+        assert_eq!(
+            check_successor(&newer_protocol, &release("1.2.0")),
+            Err(ReleaseError::ProtocolRollback {
+                previous: 2,
+                candidate: 1
+            })
+        );
+        let mut other = release("3.0.0");
+        other.game_id = "cubyz".into();
+        assert_eq!(check_successor(&v1, &other), Err(ReleaseError::OtherGame));
+        let mut unsafe_path = release("3.0.0");
+        unsafe_path.artifacts[0].path = "../x".into();
+        assert!(matches!(
+            check_successor(&v1, &unsafe_path),
+            Err(ReleaseError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn a_game_is_identified_by_developer_and_id() {
+        let g = |dev: &str| Game {
+            game_id: "turbo-kart".into(),
+            name: "Turbo Kart".into(),
+            developer: dev.into(),
+        };
+        assert_eq!(g("uhCAkA").key(), g("uhCAkA").key());
+        assert_ne!(g("uhCAkA").key(), g("uhCAkB").key());
     }
 }

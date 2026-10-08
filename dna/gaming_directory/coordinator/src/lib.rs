@@ -12,16 +12,17 @@
 
 use hdk::prelude::*;
 use holochain_moq_platform::{
-    Game, GameSummary, GameView, PublishReleaseInput, MAX_GAME_LISTING, MAX_RELEASES,
+    Game, GameKey, GameSummary, GameView, PublishReleaseInput, MAX_GAME_CLAIMS, MAX_GAME_LISTING,
+    MAX_RELEASES,
 };
 use holochain_moq_protocol::{
-    agent_verifying_key, resolve_sessions, signing_payload, Capability, EndpointAdvertisement,
-    Peer as ProtoPeer, PeerEndpoint, Session, SessionId, SignAdmissionProofInput,
-    SignAdmissionProofOutput, Stream, StreamId,
+    agent_verifying_key, resolve_sessions, signing_payload, BindingSignature, Capability,
+    EndpointAdvertisement, Peer as ProtoPeer, PeerEndpoint, Session, SessionId,
+    SignAdmissionProofInput, SignAdmissionProofOutput, SignedPresence, Stream, StreamId,
 };
 use moq_directory_integrity::{
-    game_path, EntryTypes, GameEntry, GameReleaseEntry, LinkTypes, Peer, PeerEndpointEntry,
-    SessionRecord, StreamAdvertisement, ALL_GAMES_PATH,
+    developer_tag, game_path, EntryTypes, GameEntry, GameReleaseEntry, LinkTypes, Peer,
+    PeerEndpointEntry, SessionRecord, StreamAdvertisement, UnitEntryTypes, ALL_GAMES_PATH,
 };
 
 const ALL_STREAMS_PATH: &str = "streams";
@@ -76,22 +77,35 @@ fn link_target_action(link: &Link) -> Option<ActionHash> {
 #[hdk_extern]
 pub fn publish_endpoint(peer_endpoint: PeerEndpoint) -> ExternResult<ActionHash> {
     // Legacy shape: stamped now, no stated expiry.
-    store_advertisement(EndpointAdvertisement {
-        peer_endpoint,
-        published_at: now_millis()?,
-        expires_at: None,
-    })
+    store_advertisement(
+        EndpointAdvertisement {
+            peer_endpoint,
+            published_at: now_millis()?,
+            expires_at: None,
+        },
+        None,
+    )
 }
 
 /// Like `publish_endpoint`, but the caller states `published_at` and an
 /// optional `expires_at` (ms since epoch). Incoherent freshness is rejected
-/// by validation.
+/// by validation. An iroh endpoint needs `publish_signed_presence` instead.
 #[hdk_extern]
 pub fn publish_endpoint_advertisement(ad: EndpointAdvertisement) -> ExternResult<ActionHash> {
-    store_advertisement(ad)
+    store_advertisement(ad, None)
 }
 
-fn store_advertisement(ad: EndpointAdvertisement) -> ExternResult<ActionHash> {
+/// Publish an advertisement with its EndpointId's binding signature (required
+/// for an iroh endpoint; validation verifies it).
+#[hdk_extern]
+pub fn publish_signed_presence(p: SignedPresence) -> ExternResult<ActionHash> {
+    store_advertisement(p.advertisement, Some(p.binding_signature))
+}
+
+fn store_advertisement(
+    ad: EndpointAdvertisement,
+    binding_signature: Option<BindingSignature>,
+) -> ExternResult<ActionHash> {
     let me = agent_info()?.agent_initial_pubkey;
     let peer_endpoint = ad.peer_endpoint.clone();
 
@@ -99,6 +113,7 @@ fn store_advertisement(ad: EndpointAdvertisement) -> ExternResult<ActionHash> {
         peer_endpoint: ad.peer_endpoint,
         published_at: ad.published_at,
         expires_at: ad.expires_at,
+        binding_signature,
     }))?;
     create_link(
         me.clone(),
@@ -392,18 +407,21 @@ pub fn get_recent_endpoint_advertisements(
     Ok(ads)
 }
 
-/// Register a game (`game.developer` must be the caller - validation). The
-/// first registration of a `game_id` owns it when read back.
+/// Register a game under the caller's key (`game.developer` must be the
+/// caller, and the caller must not have registered this `game_id` before -
+/// both validation). Other developers' games with the same id are different
+/// games.
 #[hdk_extern]
 pub fn register_game(game: Game) -> ExternResult<ActionHash> {
     game.validate().map_err(guest)?;
+    let me = agent_info()?.agent_initial_pubkey;
     let id_path = game_path(&game.game_id);
     let hash = create_entry(EntryTypes::GameEntry(GameEntry { game }))?;
     create_link(
         path_hash(&id_path)?,
         hash.clone(),
         LinkTypes::GameIdToGame,
-        (),
+        developer_tag(&me),
     )?;
     create_link(
         path_hash(ALL_GAMES_PATH)?,
@@ -414,59 +432,93 @@ pub fn register_game(game: Game) -> ExternResult<ActionHash> {
     Ok(hash)
 }
 
-/// Publish a release of a registered game. Only the game's developer's
-/// releases are valid (validation).
+/// Publish the next release of a registered game. Only the game's developer
+/// may, and only a strictly newer version than the game's latest release
+/// (validation). The predecessor is found on the caller's own chain.
 #[hdk_extern]
 pub fn publish_release(input: PublishReleaseInput) -> ExternResult<ActionHash> {
     input.release.validate().map_err(guest)?;
     let base = moq_directory_integrity::parse_action_hash(&input.game)
         .ok_or_else(|| guest(format!("{:?} is not a game id", input.game)))?;
+    let previous = latest_own_release(&input.game)?.unwrap_or_else(|| input.game.clone());
     let hash = create_entry(EntryTypes::GameReleaseEntry(GameReleaseEntry {
         game: input.game,
+        previous,
         release: input.release,
     }))?;
     create_link(base, hash.clone(), LinkTypes::GameToRelease, ())?;
     Ok(hash)
 }
 
-/// A game entry's (author, time, game), if the author is the developer.
-fn read_game(hash: ActionHash) -> ExternResult<Option<(ActionHash, i64, Game)>> {
+/// The caller's newest release of `game` on its own chain (base64 hash).
+fn latest_own_release(game: &str) -> ExternResult<Option<String>> {
+    let filter = ChainQueryFilter::new()
+        .entry_type(UnitEntryTypes::GameReleaseEntry.try_into()?)
+        .include_entries(true);
+    for record in query(filter)?.into_iter().rev() {
+        let e: Option<GameReleaseEntry> = record.entry().to_app_option().map_err(guest)?;
+        if e.is_some_and(|e| e.game == game) {
+            return Ok(Some(record.action_address().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// A game entry's (hash, action seq, time, game), if its author is the developer.
+fn read_game(hash: ActionHash) -> ExternResult<Option<(ActionHash, u32, i64, Game)>> {
     let Some(record) = get(hash.clone(), GetOptions::default())? else {
         return Ok(None);
     };
+    let seq = record.action().action_seq();
     let at = record.action().timestamp().as_millis();
     let author = record.action().author().to_string();
     let entry: Option<GameEntry> = record.entry().to_app_option().map_err(guest)?;
     Ok(entry
         .filter(|e| e.game.developer == author)
-        .map(|e| (hash, at, e.game)))
+        .map(|e| (hash, seq, at, e.game)))
 }
 
-/// The registered game with this id (first registration wins) and its
-/// developer's releases, newest version first, at most `MAX_RELEASES`.
-#[hdk_extern]
-pub fn get_game(game_id: String) -> ExternResult<Option<GameView>> {
-    if !holochain_moq_platform::valid_game_id(&game_id) {
-        return Err(guest(format!("{game_id:?} is not a game id")));
+fn summary((hash, _, at, game): (ActionHash, u32, i64, Game)) -> GameSummary {
+    GameSummary {
+        id: hash.to_string(),
+        game,
+        registered_at: at,
     }
-    let mut owner: Option<(ActionHash, i64, Game)> = None;
-    for link in get_links(
-        LinkQuery::try_new(path_hash(&game_path(&game_id))?, LinkTypes::GameIdToGame)?,
-        GetStrategy::default(),
+}
+
+/// The game `key` names (that developer's registration of that id) and its
+/// releases, newest version first, at most `MAX_RELEASES`. Reads only the
+/// developer's own registry links, so other registrations of the id cost
+/// nothing and cannot hide it.
+#[hdk_extern]
+pub fn get_game(key: GameKey) -> ExternResult<Option<GameView>> {
+    if !holochain_moq_platform::valid_game_id(&key.game_id) {
+        return Err(guest(format!("{:?} is not a game id", key.game_id)));
+    }
+    let developer = AgentPubKey::try_from(key.developer.as_str())
+        .map_err(|_| guest(format!("{:?} is not an agent key", key.developer)))?;
+    let query = LinkQuery::try_new(
+        path_hash(&game_path(&key.game_id))?,
+        LinkTypes::GameIdToGame,
     )?
-    .into_iter()
-    .take(MAX_RELEASES)
+    .tag_prefix(developer_tag(&developer));
+    // Validation allows one registration per (developer, id); should a
+    // validator still see two, the earlier one on the developer's chain wins.
+    let mut owner: Option<(ActionHash, u32, i64, Game)> = None;
+    for link in get_links(query, GetStrategy::default())?
+        .into_iter()
+        .take(MAX_GAME_CLAIMS)
     {
         let Some(h) = link_target_action(&link) else {
             continue;
         };
         if let Some(g) = read_game(h)? {
-            if g.2.game_id == game_id && owner.as_ref().is_none_or(|o| (g.1, &g.0) < (o.1, &o.0)) {
+            if g.3.key() == key && owner.as_ref().is_none_or(|o| g.1 < o.1) {
                 owner = Some(g);
             }
         }
     }
-    let Some((hash, registered_at, game)) = owner else {
+    let Some((hash, _, registered_at, game)) = owner else {
         return Ok(None);
     };
     let mut releases = Vec::new();
@@ -493,7 +545,41 @@ pub fn get_game(game_id: String) -> ExternResult<Option<GameView>> {
     }))
 }
 
-/// Registered games (first registration per id), at most
+/// Every developer's registration of `game_id`, ordered by developer key (no
+/// ranking: none of them is "the" game), at most `MAX_GAME_CLAIMS`.
+#[hdk_extern]
+pub fn find_games(game_id: String) -> ExternResult<Vec<GameSummary>> {
+    if !holochain_moq_platform::valid_game_id(&game_id) {
+        return Err(guest(format!("{game_id:?} is not a game id")));
+    }
+    let mut links = get_links(
+        LinkQuery::try_new(path_hash(&game_path(&game_id))?, LinkTypes::GameIdToGame)?,
+        GetStrategy::default(),
+    )?;
+    links.sort_by(|a, b| {
+        a.tag
+            .0
+            .cmp(&b.tag.0)
+            .then(a.create_link_hash.cmp(&b.create_link_hash))
+    });
+    let mut out: Vec<GameSummary> = Vec::new();
+    for link in links.into_iter().take(2 * MAX_GAME_CLAIMS) {
+        if out.len() >= MAX_GAME_CLAIMS {
+            break;
+        }
+        let Some(h) = link_target_action(&link) else {
+            continue;
+        };
+        if let Some(g) = read_game(h)? {
+            if g.3.game_id == game_id && !out.iter().any(|o| o.key() == g.3.key()) {
+                out.push(summary(g));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Registered games, one line per `(developer, game_id)`, at most
 /// `min(limit, MAX_GAME_LISTING)`.
 #[hdk_extern]
 pub fn list_games(limit: u32) -> ExternResult<Vec<GameSummary>> {
@@ -511,13 +597,9 @@ pub fn list_games(limit: u32) -> ExternResult<Vec<GameSummary>> {
         let Some(h) = link_target_action(&link) else {
             continue;
         };
-        if let Some((hash, at, game)) = read_game(h)? {
-            if !out.iter().any(|o| o.game.game_id == game.game_id) {
-                out.push(GameSummary {
-                    id: hash.to_string(),
-                    game,
-                    registered_at: at,
-                });
+        if let Some(g) = read_game(h)? {
+            if !out.iter().any(|o| o.key() == g.3.key()) {
+                out.push(summary(g));
             }
         }
     }

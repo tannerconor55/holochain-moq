@@ -33,7 +33,8 @@ pub use endpoint::{
 pub use hash::{looks_like_action_hash, ActionHashB64, ACTION_HASH_B64_LEN};
 pub use peer::Peer;
 pub use presence::{
-    check_presence, PresenceError, MAX_PRESENCE_TTL_MS, MAX_RECENT_ADS, PRESENCE_REFRESH_MS,
+    check_presence, iroh_binding_payload, BindingSignature, PresenceError, SignedPresence,
+    IROH_BINDING_CONTEXT, MAX_PRESENCE_TTL_MS, MAX_RECENT_ADS, PRESENCE_REFRESH_MS,
     PRESENCE_TTL_MS,
 };
 pub use session::{resolve_sessions, Session, SessionError, SessionId, SessionState};
