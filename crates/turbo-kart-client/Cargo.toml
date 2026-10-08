@@ -1,0 +1,20 @@
+[package]
+name = "holochain-moq-turbo-kart-client"
+description = "Native client for the turbo_kart DNA: lobby API over the game's own app, composed with platform presence from the gaming directory. Game-specific; the bridge and the realtime crates stay game-neutral."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+holochain-moq-protocol = { workspace = true }
+holochain-moq-node = { workspace = true }
+holochain-moq-hdk-bridge = { workspace = true }
+holochain-moq-turbo-kart = { path = "../turbo-kart" }
+holo_hash = "=0.7.0"
+holochain_client = "=0.9.0"
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

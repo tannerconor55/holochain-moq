@@ -3,7 +3,7 @@
 //! `holochain_moq_realtime`'s own `anyhow::Error` (transport-plane errors)
 //! rather than collapsing everything into one generic string.
 
-use holochain_moq_protocol::{lobby::LobbyError, AgentPubKeyB64, SessionError, StreamId};
+use holochain_moq_protocol::{AgentPubKeyB64, PresenceError, SessionError, StreamId};
 use thiserror::Error;
 
 /// Boxed cause for errors whose concrete type belongs to a specific
@@ -76,17 +76,10 @@ pub enum DirectoryError {
     #[error("invalid session: {0}")]
     InvalidSession(#[source] SessionError),
 
-    /// WP7: a lobby record (lobby, join, status, result) breaks a bound or rule
-    /// the DNA would reject; caught before the call.
-    #[error("invalid lobby record: {0}")]
-    InvalidLobbyRecord(#[source] LobbyError),
-
-    /// WP7: a race result naming a player other than the caller.
-    #[error("agent {caller} cannot publish a race result for a different player ({claimed})")]
-    ResultAuthorMismatch {
-        caller: AgentPubKeyB64,
-        claimed: AgentPubKeyB64,
-    },
+    /// An iroh presence advertisement breaks the directory's presence rule
+    /// (no expiry, or too long); caught before the call.
+    #[error("invalid presence advertisement: {0}")]
+    InvalidPresence(#[source] PresenceError),
 
     /// A directory backed by a remote service (a Holochain conductor)
     /// could not establish or keep its connection to it. Distinct from

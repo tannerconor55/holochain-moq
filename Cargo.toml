@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/protocol",
     "crates/platform",
+    "crates/turbo-kart",
+    "crates/turbo-kart-client",
     "crates/mesh",
     "crates/mesh-iroh",
     "crates/kart-wire",

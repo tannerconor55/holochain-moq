@@ -2996,11 +2996,14 @@ dependencies = [
  "holochain-moq-mesh",
  "holochain-moq-mesh-iroh",
  "holochain-moq-node",
+ "holochain-moq-platform",
  "holochain-moq-playback",
  "holochain-moq-protocol",
  "holochain-moq-realtime",
  "holochain-moq-screen-linux",
  "holochain-moq-screenshare",
+ "holochain-moq-turbo-kart",
+ "holochain-moq-turbo-kart-client",
  "holochain-moq-video",
  "holochain-moq-video-file",
  "holochain_client",
@@ -3148,7 +3151,6 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "uuid 1.26.1",
 ]
 
@@ -3215,6 +3217,33 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid 1.26.1",
+]
+
+[[package]]
+name = "holochain-moq-turbo-kart"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "holochain-moq-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "holochain-moq-turbo-kart-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "holo_hash",
+ "holochain-moq-hdk-bridge",
+ "holochain-moq-node",
+ "holochain-moq-protocol",
+ "holochain-moq-turbo-kart",
+ "holochain_client",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

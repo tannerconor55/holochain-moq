@@ -27,10 +27,11 @@ use holochain_moq_protocol::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 
-/// Name of the coordinator zome in `dna/` (`dna/workdir/dna.yaml`).
+/// Name of the gaming directory's coordinator zome (`dna/workdir/gaming_directory/dna.yaml`).
 pub const ZOME_NAME: &str = "moq_directory";
-/// Role name in `dna/workdir/happ.yaml`.
-pub const DEFAULT_ROLE_NAME: &str = "moq_directory";
+/// Role of the gaming directory in the platform hApp
+/// (`dna/workdir/gaming_directory/happ.yaml`).
+pub const DEFAULT_ROLE_NAME: &str = "gaming_directory";
 
 /// The one thing `HolochainPeerDirectory` needs from a conductor
 /// connection: this agent's key, and the ability to call a coordinator zome
@@ -46,6 +47,7 @@ pub trait ZomeCaller: Send + Sync {
 struct AppWebsocketCaller {
     app_ws: AppWebsocket,
     role_name: String,
+    zome_name: String,
 }
 
 #[async_trait]
@@ -58,7 +60,7 @@ impl ZomeCaller for AppWebsocketCaller {
         self.app_ws
             .call_zome(
                 ZomeCallTarget::RoleName(self.role_name.clone()),
-                ZOME_NAME.into(),
+                self.zome_name.clone().into(),
                 fn_name.into(),
                 payload,
             )
@@ -73,8 +75,11 @@ pub struct ConductorConfig {
     pub admin_addr: SocketAddr,
     /// `installed_app_id` the DNA's hApp was installed under.
     pub installed_app_id: String,
-    /// Role of the `moq_directory` DNA within that app.
+    /// Role of the DNA within that app (the gaming directory by default).
     pub role_name: String,
+    /// Coordinator zome to call (the gaming directory's by default; a game
+    /// client points this at its own DNA's zome).
+    pub zome_name: String,
     /// Websocket `Origin` for the admin/app connections.
     pub origin: String,
 }
@@ -85,6 +90,7 @@ impl ConductorConfig {
             admin_addr,
             installed_app_id: installed_app_id.into(),
             role_name: DEFAULT_ROLE_NAME.to_string(),
+            zome_name: ZOME_NAME.to_string(),
             origin: "holochain-moq-hdk-bridge".to_string(),
         }
     }
@@ -221,6 +227,7 @@ impl HolochainPeerDirectory {
         Ok(Arc::new(AppWebsocketCaller {
             app_ws,
             role_name: config.role_name,
+            zome_name: config.zome_name,
         }))
     }
 
@@ -230,21 +237,7 @@ impl HolochainPeerDirectory {
         I: Serialize + std::fmt::Debug,
         O: DeserializeOwned + std::fmt::Debug,
     {
-        let payload = ExternIO::encode(input).map_err(|e| DirectoryError::ZomeCallFailed {
-            call: fn_name,
-            source: Box::new(e),
-        })?;
-        let response = self
-            .caller
-            .call(fn_name, payload)
-            .await
-            .map_err(|e| translate_client_error(fn_name, e))?;
-        response
-            .decode::<O>()
-            .map_err(|e| DirectoryError::InvalidResponse {
-                call: fn_name,
-                reason: e.to_string(),
-            })
+        call_zome(self.caller.as_ref(), fn_name, input).await
     }
 
     fn local(&self) -> AgentPubKeyB64 {
@@ -290,6 +283,34 @@ impl HolochainPeerDirectory {
         let bytes = output.signature;
         Ok((output.agent, bytes))
     }
+}
+
+/// One typed zome call through any [`ZomeCaller`]: encode, call, translate
+/// errors, decode. What every directory method uses; game clients use it for
+/// their own DNA's zome.
+pub async fn call_zome<I, O>(
+    caller: &dyn ZomeCaller,
+    fn_name: &'static str,
+    input: &I,
+) -> Result<O, DirectoryError>
+where
+    I: Serialize + std::fmt::Debug,
+    O: DeserializeOwned + std::fmt::Debug,
+{
+    let payload = ExternIO::encode(input).map_err(|e| DirectoryError::ZomeCallFailed {
+        call: fn_name,
+        source: Box::new(e),
+    })?;
+    let response = caller
+        .call(fn_name, payload)
+        .await
+        .map_err(|e| translate_client_error(fn_name, e))?;
+    response
+        .decode::<O>()
+        .map_err(|e| DirectoryError::InvalidResponse {
+            call: fn_name,
+            reason: e.to_string(),
+        })
 }
 
 /// `AgentPubKeyB64` -> `holo_hash::AgentPubKey`.
@@ -487,8 +508,8 @@ impl PeerDirectory for HolochainPeerDirectory {
     }
 }
 
-pub mod lobby;
-pub use lobby::{parse_lobby_id, unix_now_ms, PresenceRefresher};
+pub mod presence;
+pub use presence::{parse_action_hash, unix_now_ms, PresenceRefresher};
 
 #[cfg(test)]
 mod tests;
