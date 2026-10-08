@@ -16,3 +16,4 @@ holochain_serialized_bytes = "0.0.57"
 # feature unification with the coordinator. Same version hdi already resolves.
 holo_hash = { version = "=0.7.0", features = ["encoding"] }
 holochain-moq-protocol = { workspace = true }
+holochain-moq-platform = { workspace = true }

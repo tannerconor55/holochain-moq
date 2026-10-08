@@ -479,6 +479,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain-moq-platform"
+version = "0.1.0"
+dependencies = [
+ "holochain-moq-protocol",
+ "serde",
+]
+
+[[package]]
 name = "holochain-moq-protocol"
 version = "0.1.0"
 dependencies = [
@@ -486,8 +494,17 @@ dependencies = [
  "ed25519-dalek",
  "serde",
  "serde_json",
- "sha2",
  "uuid",
+]
+
+[[package]]
+name = "holochain-moq-turbo-kart"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "holochain-moq-protocol",
+ "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -705,6 +722,7 @@ name = "moq_directory"
 version = "0.1.0"
 dependencies = [
  "hdk",
+ "holochain-moq-platform",
  "holochain-moq-protocol",
  "holochain_serialized_bytes",
  "moq_directory_integrity",
@@ -716,6 +734,7 @@ name = "moq_directory_forge"
 version = "0.1.0"
 dependencies = [
  "hdk",
+ "holochain-moq-platform",
  "holochain-moq-protocol",
  "holochain_serialized_bytes",
  "moq_directory_integrity",
@@ -728,6 +747,7 @@ version = "0.1.0"
 dependencies = [
  "hdi",
  "holo_hash",
+ "holochain-moq-platform",
  "holochain-moq-protocol",
  "holochain_serialized_bytes",
  "serde",
@@ -1078,6 +1098,41 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "turbo_kart"
+version = "0.1.0"
+dependencies = [
+ "hdk",
+ "holochain-moq-protocol",
+ "holochain-moq-turbo-kart",
+ "holochain_serialized_bytes",
+ "serde",
+ "turbo_kart_integrity",
+]
+
+[[package]]
+name = "turbo_kart_forge"
+version = "0.1.0"
+dependencies = [
+ "hdk",
+ "holochain-moq-turbo-kart",
+ "holochain_serialized_bytes",
+ "serde",
+ "turbo_kart_integrity",
+]
+
+[[package]]
+name = "turbo_kart_integrity"
+version = "0.1.0"
+dependencies = [
+ "hdi",
+ "holo_hash",
+ "holochain-moq-protocol",
+ "holochain-moq-turbo-kart",
+ "holochain_serialized_bytes",
+ "serde",
 ]
 
 [[package]]

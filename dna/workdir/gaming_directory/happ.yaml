@@ -1,0 +1,19 @@
+# The Gaming Hub's platform hApp: one directory cell per agent. Games are
+# separate hApps installed under the same agent key (see ARCHITECTURE.md
+# "Gaming platform DNA split"); none of them bundles this DNA.
+---
+manifest_version: "0"
+name: gaming_platform
+description: Gaming platform directory (identity, presence, game registry)
+roles:
+  - name: gaming_directory
+    provisioning:
+      strategy: create
+      deferred: false
+    dna:
+      path: ./gaming_directory.dna
+      modifiers:
+        network_seed: ~
+        properties: ~
+      installed_hash: ~
+      clone_limit: 0

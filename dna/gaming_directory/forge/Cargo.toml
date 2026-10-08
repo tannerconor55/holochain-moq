@@ -7,8 +7,8 @@ publish = false
 
 # TEST ONLY. A coordinator that commits arbitrary entries and links, so tests
 # can prove the *integrity* zome rejects forged records the honest coordinator
-# never produces. Packed only into dna/workdir/forge (test DNA); never part of
-# workdir/dna.yaml or the hApp.
+# never produces. Packed only into dna/workdir/gaming_directory/forge (test DNA); never part of
+# the production manifests or hApps.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -19,4 +19,5 @@ hdk = { workspace = true }
 serde = { workspace = true }
 holochain_serialized_bytes = "0.0.57"
 holochain-moq-protocol = { workspace = true }
+holochain-moq-platform = { workspace = true }
 moq_directory_integrity = { path = "../integrity" }

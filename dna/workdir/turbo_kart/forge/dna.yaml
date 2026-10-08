@@ -1,0 +1,21 @@
+# TEST ONLY. Production turbo_kart integrity (identical validation and DNA
+# hash) plus its coordinator and a forging coordinator. Never ship this DNA.
+---
+manifest_version: "0"
+name: turbo_kart
+integrity:
+  network_seed: ~
+  properties: ~
+  zomes:
+    - name: turbo_kart_integrity
+      path: ../../../target/wasm32-unknown-unknown/release/turbo_kart_integrity.wasm
+coordinator:
+  zomes:
+    - name: turbo_kart
+      path: ../../../target/wasm32-unknown-unknown/release/turbo_kart.wasm
+      dependencies:
+        - name: turbo_kart_integrity
+    - name: forge
+      path: ../../../target/wasm32-unknown-unknown/release/turbo_kart_forge.wasm
+      dependencies:
+        - name: turbo_kart_integrity

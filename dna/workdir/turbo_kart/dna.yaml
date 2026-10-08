@@ -1,0 +1,18 @@
+# Turbo Kart's own DNA: lobbies, membership, race status, results and the
+# leaderboard. No identity or presence records: those are the gaming
+# directory's, under the same agent key.
+---
+manifest_version: "0"
+name: turbo_kart
+integrity:
+  network_seed: ~
+  properties: ~
+  zomes:
+    - name: turbo_kart_integrity
+      path: ../../target/wasm32-unknown-unknown/release/turbo_kart_integrity.wasm
+coordinator:
+  zomes:
+    - name: turbo_kart
+      path: ../../target/wasm32-unknown-unknown/release/turbo_kart.wasm
+      dependencies:
+        - name: turbo_kart_integrity

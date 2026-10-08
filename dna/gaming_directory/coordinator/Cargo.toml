@@ -13,4 +13,5 @@ hdk = { workspace = true }
 serde = { workspace = true }
 holochain_serialized_bytes = "0.0.57"
 holochain-moq-protocol = { workspace = true }
+holochain-moq-platform = { workspace = true }
 moq_directory_integrity = { path = "../integrity" }

@@ -1,0 +1,21 @@
+[package]
+name = "turbo_kart_forge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# TEST ONLY. A coordinator that commits arbitrary Turbo Kart records and links,
+# so tests can prove the *integrity* zome rejects forged records the honest
+# coordinator never produces. Packed only into dna/workdir/turbo_kart/forge.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "turbo_kart_forge"
+
+[dependencies]
+hdk = { workspace = true }
+serde = { workspace = true }
+holochain_serialized_bytes = "0.0.57"
+holochain-moq-turbo-kart = { workspace = true }
+turbo_kart_integrity = { path = "../integrity" }

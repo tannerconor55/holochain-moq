@@ -1,0 +1,20 @@
+# The Turbo Kart game hApp: only Turbo Kart's DNA. It must not bundle the
+# gaming directory: the Hub installs that once per agent, and Holochain 0.7
+# refuses a second cell of the same DNA for the same agent (CellAlreadyExists).
+# Install it under the same agent key as the platform hApp.
+---
+manifest_version: "0"
+name: turbo_kart
+description: Turbo Kart Rally control plane (lobbies, races, results)
+roles:
+  - name: turbo_kart
+    provisioning:
+      strategy: create
+      deferred: false
+    dna:
+      path: ./turbo_kart.dna
+      modifiers:
+        network_seed: ~
+        properties: ~
+      installed_hash: ~
+      clone_limit: 0

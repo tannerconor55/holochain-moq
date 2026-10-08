@@ -3,9 +3,17 @@
 # build for a different target with different flags. See PROTOCOL.md.
 [workspace]
 resolver = "2"
-# `forge` is a TEST-ONLY coordinator (see forge/Cargo.toml), packed only into
-# workdir/forge/dna.yaml.
-members = ["integrity", "coordinator", "forge"]
+# Two DNAs (gaming platform split): `gaming_directory` (platform-wide records)
+# and `turbo_kart` (Turbo Kart's lobbies and results). Each has a TEST-ONLY
+# `forge` coordinator, packed only into its workdir/<dna>/forge test DNA.
+members = [
+    "gaming_directory/integrity",
+    "gaming_directory/coordinator",
+    "gaming_directory/forge",
+    "turbo_kart/integrity",
+    "turbo_kart/coordinator",
+    "turbo_kart/forge",
+]
 
 [workspace.package]
 edition = "2021"
@@ -16,6 +24,8 @@ hdi = "=0.8.0"
 hdk = "=0.7.0"
 serde = "1"
 holochain-moq-protocol = { path = "../crates/protocol" }
+holochain-moq-platform = { path = "../crates/platform" }
+holochain-moq-turbo-kart = { path = "../crates/turbo-kart" }
 
 [profile.release]
 opt-level = "z"

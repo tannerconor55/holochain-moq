@@ -1,4 +1,11 @@
-//! Integrity zome for the holochain-moq control plane.
+//! Integrity zome of the `gaming_directory` DNA: the platform's shared control
+//! plane (historically `moq_directory`; the zome keeps that name so media
+//! tools and the bridge are unchanged).
+//!
+//! Platform-wide records only: peers, endpoint advertisements / presence (the
+//! AgentPubKey <-> iroh EndpointId binding), stream and session metadata, and
+//! the game registry. No game's records live here: Turbo Kart's lobbies and
+//! results are in the `turbo_kart` DNA, and every other game gets its own DNA.
 //!
 //! Describes *who is reachable where* (peer endpoints + transport
 //! identities) and *which streams exist* (stream advertisements). It never
@@ -13,7 +20,7 @@
 //! of the transport identity is not this zome's job (`crates/realtime`).
 
 use hdi::prelude::*;
-use holochain_moq_protocol::lobby::{self, Lobby, LobbyJoin, LobbyLeave, LobbyStatus, RaceResult};
+use holochain_moq_platform::{Game, GameRelease};
 use holochain_moq_protocol::{
     AgentPubKeyB64, Capability, EndpointAdvertisement, PeerEndpoint, Session, Stream,
 };
@@ -75,44 +82,22 @@ pub struct SessionRecord {
     pub session: Session,
 }
 
-/// WP7: a kart lobby (`protocol::lobby::Lobby`). `lobby.host` must equal the
-/// author; created_at is the action timestamp.
+/// A game in the platform registry (`holochain_moq_platform::Game`).
+/// `game.developer` must equal the author.
 #[hdk_entry_helper]
 #[derive(Clone, PartialEq)]
-pub struct LobbyEntry {
-    pub lobby: Lobby,
+pub struct GameEntry {
+    pub game: Game,
 }
 
-/// WP7: a player joining a lobby. `join.player` must equal the author; the
-/// referenced lobby must exist, and its access rule must be met.
+/// One release of a registered game. `game` is the `ActionHash` (base64) of
+/// the game's registry entry; only that entry's author (the developer) may
+/// publish releases for it, and `release.game_id` must match it.
 #[hdk_entry_helper]
 #[derive(Clone, PartialEq)]
-pub struct LobbyJoinEntry {
-    pub join: LobbyJoin,
-}
-
-/// WP7: a player leaving a lobby (append-only; see `protocol::lobby::resolve_members`).
-#[hdk_entry_helper]
-#[derive(Clone, PartialEq)]
-pub struct LobbyLeaveEntry {
-    pub leave: LobbyLeave,
-}
-
-/// WP7: a lobby state change. Only the referenced lobby's author (its host)
-/// may author one.
-#[hdk_entry_helper]
-#[derive(Clone, PartialEq)]
-pub struct LobbyStatusEntry {
-    pub status: LobbyStatus,
-}
-
-/// WP7: a self-reported race result. `result.player` must equal the author and
-/// the times must be plausible for the referenced lobby's track and laps.
-/// Plausibility is not anti-cheat.
-#[hdk_entry_helper]
-#[derive(Clone, PartialEq)]
-pub struct RaceResultEntry {
-    pub result: RaceResult,
+pub struct GameReleaseEntry {
+    pub game: String,
+    pub release: GameRelease,
 }
 
 #[hdk_entry_types]
@@ -122,11 +107,8 @@ pub enum EntryTypes {
     PeerEndpointEntry(PeerEndpointEntry),
     StreamAdvertisement(StreamAdvertisement),
     SessionRecord(SessionRecord),
-    LobbyEntry(LobbyEntry),
-    LobbyJoinEntry(LobbyJoinEntry),
-    LobbyLeaveEntry(LobbyLeaveEntry),
-    LobbyStatusEntry(LobbyStatusEntry),
-    RaceResultEntry(RaceResultEntry),
+    GameEntry(GameEntry),
+    GameReleaseEntry(GameReleaseEntry),
 }
 
 #[hdk_link_types]
@@ -147,19 +129,12 @@ pub enum LinkTypes {
     AllSessions,
     /// Typed-path plumbing required by `TypedPath`.
     Anchor,
-    /// path(`lobby::lobby_bucket(created_at)`) -> `LobbyEntry` (hour-bucketed discovery)
-    LobbyBucket,
-    /// lobby action -> `LobbyJoinEntry`
-    LobbyToJoin,
-    /// lobby action -> `LobbyLeaveEntry`
-    LobbyToLeave,
-    /// lobby action -> `LobbyStatusEntry`
-    LobbyToStatus,
-    /// agent pubkey -> that agent's `RaceResultEntry` entries
-    AgentToResult,
-    /// path(`lobby::leaderboard_path(track, band)`) -> `RaceResultEntry`;
-    /// tag = best_lap_ms, big-endian u32
-    LeaderboardBand,
+    /// path(`platform.game.<game_id>`) -> `GameEntry` (lookup by game id)
+    GameIdToGame,
+    /// path(`platform.games`) -> every `GameEntry` (listing)
+    AllGames,
+    /// game entry action -> `GameReleaseEntry`
+    GameToRelease,
 }
 
 #[hdk_extern]
@@ -199,8 +174,8 @@ fn validate_entry(
                     "PeerEndpoint advertisement: {err}"
                 )));
             }
-            // WP7 presence: an iroh endpoint must state a bounded expiry.
-            if let Err(err) = lobby::check_presence(&e.advertisement()) {
+            // Presence: an iroh endpoint must state a bounded expiry.
+            if let Err(err) = holochain_moq_protocol::check_presence(&e.advertisement()) {
                 return invalid(format!("PeerEndpoint advertisement: {err}"));
             }
             require_author(author, &e.peer_endpoint.agent, "PeerEndpoint")
@@ -212,69 +187,33 @@ fn validate_entry(
             }
             require_author(author, &r.session.publisher, "Session")
         }
-        EntryTypes::LobbyEntry(e) => {
-            if let Err(err) = e.lobby.validate() {
-                return invalid(format!("Lobby: {err}"));
+        EntryTypes::GameEntry(e) => {
+            if let Err(err) = e.game.validate() {
+                return invalid(format!("Game: {err}"));
             }
-            require_author(author, &e.lobby.host, "Lobby")
+            require_author(author, &e.game.developer, "Game")
         }
-        EntryTypes::LobbyJoinEntry(e) => {
-            let v = require_author(author, &e.join.player, "LobbyJoin")?;
-            if v != ValidateCallbackResult::Valid {
-                return Ok(v);
+        EntryTypes::GameReleaseEntry(e) => {
+            if let Err(err) = e.release.validate() {
+                return invalid(format!("GameRelease: {err}"));
             }
-            if let Err(err) = e.join.validate() {
-                return invalid(format!("LobbyJoin: {err}"));
-            }
-            let (_, lobby) = match must_get_lobby(&e.join.lobby)? {
-                Ok(l) => l,
-                Err(why) => return invalid(format!("LobbyJoin: {why}")),
+            let (developer, game) = match must_get_game(&e.game)? {
+                Ok(g) => g,
+                Err(why) => return invalid(format!("GameRelease: {why}")),
             };
-            match e.join.validate_access(&lobby) {
-                Ok(()) => Ok(ValidateCallbackResult::Valid),
-                Err(err) => invalid(format!("LobbyJoin: {err}")),
-            }
-        }
-        EntryTypes::LobbyLeaveEntry(e) => {
-            let v = require_author(author, &e.leave.player, "LobbyLeave")?;
-            if v != ValidateCallbackResult::Valid {
-                return Ok(v);
-            }
-            match must_get_lobby(&e.leave.lobby)? {
-                Ok(_) => Ok(ValidateCallbackResult::Valid),
-                Err(why) => invalid(format!("LobbyLeave: {why}")),
-            }
-        }
-        EntryTypes::LobbyStatusEntry(e) => {
-            if let Err(err) = e.status.validate() {
-                return invalid(format!("LobbyStatus: {err}"));
-            }
-            let (lobby_author, lobby) = match must_get_lobby(&e.status.lobby)? {
-                Ok(l) => l,
-                Err(why) => return invalid(format!("LobbyStatus: {why}")),
-            };
-            // The lobby's validation already bound `lobby.host` to its author.
-            if &lobby_author != author || recv_agent_string(author) != lobby.host {
+            if &developer != author {
                 return invalid(format!(
-                    "LobbyStatus: only the lobby host {} may set its status, not {author}",
-                    lobby.host
+                    "GameRelease: only the developer {developer} may publish releases of {}, not {author}",
+                    game.game_id
+                ));
+            }
+            if e.release.game_id != game.game_id {
+                return invalid(format!(
+                    "GameRelease: release is for {:?} but references game {:?}",
+                    e.release.game_id, game.game_id
                 ));
             }
             Ok(ValidateCallbackResult::Valid)
-        }
-        EntryTypes::RaceResultEntry(e) => {
-            let v = require_author(author, &e.result.player, "RaceResult")?;
-            if v != ValidateCallbackResult::Valid {
-                return Ok(v);
-            }
-            let (_, lobby) = match must_get_lobby(&e.result.lobby)? {
-                Ok(l) => l,
-                Err(why) => return invalid(format!("RaceResult: {why}")),
-            };
-            match e.result.validate(&lobby) {
-                Ok(()) => Ok(ValidateCallbackResult::Valid),
-                Err(err) => invalid(format!("RaceResult: {err}")),
-            }
         }
     }
 }
@@ -285,7 +224,7 @@ fn invalid(why: String) -> ExternResult<ValidateCallbackResult> {
 
 /// Parse a base64 `ActionHash`, accepting only its canonical text form.
 pub fn parse_action_hash(s: &str) -> Option<ActionHash> {
-    if !lobby::looks_like_action_hash(s) {
+    if !holochain_moq_protocol::looks_like_action_hash(s) {
         return None; // holo_hash's parser panics on some malformed text
     }
     let h = ActionHash::try_from(s).ok()?;
@@ -303,19 +242,27 @@ fn record_entry(record: &Record) -> ExternResult<Option<EntryTypes>> {
     EntryTypes::deserialize_from_type(def.zome_index, def.entry_index, entry)
 }
 
-/// Resolve a `LobbyId` deterministically (`must_get_valid_record`: an
-/// unavailable lobby defers validation rather than failing it). The inner
-/// `Err` is a reason to reject the referencing entry.
-pub fn must_get_lobby(id: &str) -> ExternResult<Result<(AgentPubKey, Lobby), String>> {
+/// Resolve a game registry reference deterministically. The inner `Err` is a
+/// reason to reject the referencing entry. Returns the entry's author (the
+/// developer, bound by the entry's own validation) and the game.
+pub fn must_get_game(id: &str) -> ExternResult<Result<(AgentPubKey, Game), String>> {
     let Some(hash) = parse_action_hash(id) else {
         return Ok(Err(format!("{id:?} is not an action hash")));
     };
     let record = must_get_valid_record(hash)?;
     match record_entry(&record)? {
-        Some(EntryTypes::LobbyEntry(e)) => Ok(Ok((record.action().author().clone(), e.lobby))),
-        _ => Ok(Err(format!("{id} is not a lobby"))),
+        Some(EntryTypes::GameEntry(e)) => Ok(Ok((record.action().author().clone(), e.game))),
+        _ => Ok(Err(format!("{id} is not a registered game"))),
     }
 }
+
+/// Path of a game id's registry lookup.
+pub fn game_path(game_id: &str) -> String {
+    format!("platform.game.{game_id}")
+}
+
+/// Path of the registry listing.
+pub const ALL_GAMES_PATH: &str = "platform.games";
 
 /// Link validation. `Agent*` links must hang off the author's own agent key
 /// (so nobody can attach bogus endpoints/streams to someone else's agent),
@@ -380,61 +327,39 @@ fn validate_stream_index_link(
     Ok(ValidateCallbackResult::Valid)
 }
 
-/// WP7 index links. Each target must be an action the linker authored, of the
-/// right entry type, and the base must be the one that entry determines - so a
-/// link can neither put someone else's record in an index nor put a record in
-/// the wrong lobby, hour bucket or leaderboard band. Deterministic: only
-/// `must_get_valid_record` and path hashing.
-fn validate_lobby_link(
+/// Registry links: the target must be the linker's own entry of the right
+/// type, and the base the one that entry determines (its game id's path, the
+/// listing anchor, or the game it is a release of).
+fn validate_registry_link(
     link_type: LinkTypes,
     action: &TypedAction<CreateLinkData>,
 ) -> ExternResult<ValidateCallbackResult> {
     let Some(target) = action.target_address.clone().into_action_hash() else {
         return invalid("link target must be an ActionHash".into());
     };
-    let record = must_get_valid_record(target.clone())?;
+    let record = must_get_valid_record(target)?;
     if record.action().author() != action.author() {
         return invalid("link target was authored by a different agent".into());
     }
-    let entry = record_entry(&record)?;
     let base = action.base_address.clone();
-    let lobby_base = |lobby_id: &str| -> bool {
-        base.clone()
+    let ok = match (link_type, record_entry(&record)?) {
+        (LinkTypes::GameIdToGame, Some(EntryTypes::GameEntry(e))) => {
+            base == Path::from(game_path(&e.game.game_id))
+                .path_entry_hash()?
+                .into()
+        }
+        (LinkTypes::AllGames, Some(EntryTypes::GameEntry(_))) => {
+            base == Path::from(ALL_GAMES_PATH).path_entry_hash()?.into()
+        }
+        (LinkTypes::GameToRelease, Some(EntryTypes::GameReleaseEntry(e))) => base
             .into_action_hash()
-            .is_some_and(|h| h.to_string() == lobby_id)
-    };
-    let ok = match (link_type, entry) {
-        (LinkTypes::LobbyBucket, Some(EntryTypes::LobbyEntry(_))) => {
-            let bucket = lobby::lobby_bucket(record.action().timestamp().as_millis());
-            base == Path::from(bucket).path_entry_hash()?.into()
-        }
-        (LinkTypes::LobbyToJoin, Some(EntryTypes::LobbyJoinEntry(e))) => lobby_base(&e.join.lobby),
-        (LinkTypes::LobbyToLeave, Some(EntryTypes::LobbyLeaveEntry(e))) => {
-            lobby_base(&e.leave.lobby)
-        }
-        (LinkTypes::LobbyToStatus, Some(EntryTypes::LobbyStatusEntry(e))) => {
-            lobby_base(&e.status.lobby)
-        }
-        (LinkTypes::LeaderboardBand, Some(EntryTypes::RaceResultEntry(e))) => {
-            let Some(lap) = e.result.best_lap_ms else {
-                return invalid("a result without a best lap is not on the leaderboard".into());
-            };
-            let (_, lobby) = match must_get_lobby(&e.result.lobby)? {
-                Ok(l) => l,
-                Err(why) => return invalid(why),
-            };
-            let path = lobby::leaderboard_path(&lobby.track_id, lobby::leaderboard_band(lap));
-            base == Path::from(path).path_entry_hash()?.into()
-                && action.tag.0.as_slice() == lap.to_be_bytes().as_slice()
-        }
+            .is_some_and(|h| h.to_string() == e.game),
         _ => false,
     };
     if ok {
         Ok(ValidateCallbackResult::Valid)
     } else {
-        invalid(format!(
-            "{link_type:?} link does not match its target (base, entry type or tag)"
-        ))
+        invalid(format!("{link_type:?} link does not match its target"))
     }
 }
 
@@ -454,12 +379,9 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             | LinkTypes::SessionIdToSession
             | LinkTypes::AllSessions => validate_stream_index_link(&action),
             LinkTypes::Anchor => Ok(ValidateCallbackResult::Valid),
-            LinkTypes::AgentToResult => validate_agent_link(&action),
-            LinkTypes::LobbyBucket
-            | LinkTypes::LobbyToJoin
-            | LinkTypes::LobbyToLeave
-            | LinkTypes::LobbyToStatus
-            | LinkTypes::LeaderboardBand => validate_lobby_link(link_type, &action),
+            LinkTypes::GameIdToGame | LinkTypes::AllGames | LinkTypes::GameToRelease => {
+                validate_registry_link(link_type, &action)
+            }
         },
         FlatOp::Link(OpLink::DeleteLink { action, .. }) => {
             Ok(ValidateCallbackResult::Invalid(format!(
