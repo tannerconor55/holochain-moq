@@ -1,18 +1,26 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use holochain_moq_mesh::{
-    ConnectionKind, DeliveryMode, LinkCounters, LinkInfo, Role, TrackPath, TrackSource,
+    ConnectionKind, DeliveryMode, LinkCounters, LinkInfo, Role, SessionEnd, TrackPath, TrackSource,
     TransportSession,
 };
-use iroh::endpoint::{Connection, VarInt};
+use iroh::endpoint::{Connection, ConnectionError, VarInt};
 use moq_net::origin;
 
 use crate::{spawn_driver, track, versions};
 
 /// One MoQ session (both roles) over one iroh connection.
+/// Application close code of a deliberate leave (also what iroh's
+/// `Endpoint::close` sends). Anything else ending a session is a loss.
+pub const LEAVE_CODE: u32 = 0;
+/// Application close code of [`TransportSession::abort`] (superseded or
+/// severed): the remote must treat it as a loss and reconnect.
+pub const ABORT_CODE: u32 = 0x4d10;
+
 pub struct IrohMoqSession {
     conn: Connection,
     session: moq_net::Session,
+    reliable_max_age: std::time::Duration,
     /// The remote's broadcasts arrive here; a subscription reads only the one
     /// broadcast its path names.
     subscribe: origin::Producer,
@@ -24,6 +32,7 @@ impl IrohMoqSession {
         role: Role,
         remote_agent: &str,
         publish: &origin::Producer,
+        reliable_max_age: std::time::Duration,
     ) -> anyhow::Result<Self> {
         let (subscribe, driver) = origin::Producer::new(origin::Config::default());
         spawn_driver(driver);
@@ -61,6 +70,7 @@ impl IrohMoqSession {
         Ok(Self {
             conn,
             session,
+            reliable_max_age,
             subscribe,
         })
     }
@@ -100,6 +110,16 @@ impl TransportSession for IrohMoqSession {
         path: &TrackPath,
         mode: DeliveryMode,
     ) -> anyhow::Result<Box<dyn TrackSource>> {
+        self.subscribe_from(path, mode, 0)
+    }
+
+    fn subscribe_from(
+        &self,
+        path: &TrackPath,
+        mode: DeliveryMode,
+        next_seq: u64,
+    ) -> anyhow::Result<Box<dyn TrackSource>> {
+        let max_age = self.reliable_max_age;
         // Only the broadcast named by `path` is read from this session's
         // subscribe origin, so a peer can never serve another session's
         // sources, and no track is reachable outside the race.
@@ -125,12 +145,21 @@ impl TransportSession for IrohMoqSession {
             // creates a track that was requested early).
             let consumer = bc.track(&track).with_context(|| format!("track {track}"))?;
             let sub = consumer
-                .subscribe(track::subscription(mode))
+                .subscribe(track::subscription(mode, max_age))
                 .await
                 .with_context(|| format!("subscribe {broadcast}/{track}"))?;
             Ok((consumer, sub))
         };
-        Ok(Box::new(track::spawn_reader(open, mode)))
+        let start = match mode {
+            DeliveryMode::ReliableOrdered => next_seq,
+            DeliveryMode::Latest => 0,
+        };
+        Ok(Box::new(track::spawn_reader(
+            open,
+            mode,
+            start,
+            self.conn.clone(),
+        )))
     }
 
     async fn closed(&self) {
@@ -141,6 +170,24 @@ impl TransportSession for IrohMoqSession {
     }
 
     fn close(&self) {
-        self.conn.close(VarInt::from_u32(0), b"mesh session closed");
+        self.conn
+            .close(VarInt::from_u32(LEAVE_CODE), b"mesh session closed");
+    }
+
+    fn abort(&self) {
+        self.conn
+            .close(VarInt::from_u32(ABORT_CODE), b"mesh session aborted");
+    }
+
+    fn end_reason(&self) -> SessionEnd {
+        match self.conn.close_reason() {
+            Some(ConnectionError::ApplicationClosed(c))
+                if c.error_code == VarInt::from_u32(LEAVE_CODE) =>
+            {
+                SessionEnd::Left
+            }
+            Some(e) => SessionEnd::Lost(e.to_string()),
+            None => SessionEnd::Lost("MoQ session ended".into()),
+        }
     }
 }

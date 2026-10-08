@@ -32,7 +32,7 @@ use moq_net::{broadcast, origin, Version, Versions};
 
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 pub use record::{iroh_addr, iroh_addr_for, iroh_endpoint};
-pub use session::IrohMoqSession;
+pub use session::{IrohMoqSession, ABORT_CODE, LEAVE_CODE};
 pub use track::{
     LatestCarrier, LATEST_STREAM_RETENTION, RELIABLE_GROUP_OBJECTS, RELIABLE_MAX_PENDING_GROUPS,
 };
@@ -42,6 +42,11 @@ pub use track::{
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Keep-alive, so a quiet but healthy session is never idled out.
 pub const KEEP_ALIVE: Duration = Duration::from_secs(4);
+/// Byte target of the publish origin's group cache (moq-net evicts oldest
+/// first above it; a reader that loses a needed reliable group gets an
+/// explicit error). Far above one race: `RELIABLE_MAX_BYTES` (1 MiB) per
+/// reliable track.
+pub const PUBLISH_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The MoQ wire version the mesh speaks: IETF draft-16, the dialect the
 /// existing moq-transport 0.16.2 stack actually speaks (WP1 interop result).
@@ -70,6 +75,12 @@ pub struct IrohConfig {
     pub secret_key: Option<SecretKey>,
     /// How `Latest` objects are carried (datagrams by default).
     pub latest_carrier: LatestCarrier,
+    /// How long `ReliableOrdered` history is retained for late and
+    /// reconnecting subscribers (default `RELIABLE_MAX_AGE`, 30 min).
+    pub reliable_max_age: Duration,
+    /// A fixed local UDP socket to bind (default: any port). Lets a restarted
+    /// process come back on the same address (WP6 tests).
+    pub bind_addr: Option<std::net::SocketAddr>,
     /// **Tests only** (feature `test-utils`): trust any certificate presented
     /// by a *relay* server (the in-process test relay is self-signed). Peer
     /// authentication by EndpointId is unaffected.
@@ -83,6 +94,8 @@ impl IrohConfig {
             reach,
             secret_key: None,
             latest_carrier: LatestCarrier::default(),
+            reliable_max_age: holochain_moq_mesh::RELIABLE_MAX_AGE,
+            bind_addr: None,
             #[cfg(feature = "test-utils")]
             insecure_relay_tls: false,
         }
@@ -92,6 +105,7 @@ impl IrohConfig {
 pub struct IrohMeshTransport {
     endpoint: Endpoint,
     latest_carrier: LatestCarrier,
+    reliable_max_age: Duration,
     publish: origin::Producer,
     /// `race/<race>/<source>` -> the broadcast and a live `Dynamic` handle.
     /// Holding the `Dynamic` makes moq-net queue a peer's SUBSCRIBE for a
@@ -125,6 +139,11 @@ impl IrohMeshTransport {
         if let Some(key) = config.secret_key {
             builder = builder.secret_key(key);
         }
+        if let Some(addr) = config.bind_addr {
+            builder = builder
+                .bind_addr(addr)
+                .with_context(|| format!("bind address {addr}"))?;
+        }
         #[cfg(feature = "test-utils")]
         if config.insecure_relay_tls {
             builder = builder.ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify());
@@ -138,11 +157,23 @@ impl IrohMeshTransport {
         };
         let endpoint = builder.bind().await.context("bind iroh endpoint")?;
 
-        let (publish, driver) = origin::Producer::new(origin::Config::default());
+        // moq-net's default origin reclaims any group nobody read or wrote for
+        // 30 s, whatever the track's retention says (its `max_age` is a
+        // media-timestamp bound on delivery, not on caching). Reliable history
+        // must outlive a reconnect and serve late joiners, so the idle window
+        // is the configured reliable retention (30 min by default).
+        let mut origin_config = origin::Config::default();
+        origin_config.pool = moq_net::cache::Pool::new(
+            moq_net::cache::Config::default()
+                .with_expiry(config.reliable_max_age)
+                .with_capacity(PUBLISH_CACHE_BYTES),
+        );
+        let (publish, driver) = origin::Producer::new(origin_config);
         spawn_driver(driver);
         Ok(Self {
             endpoint,
             latest_carrier: config.latest_carrier,
+            reliable_max_age: config.reliable_max_age,
             publish,
             broadcasts: Mutex::new(HashMap::new()),
             tracks: Mutex::new(HashSet::new()),
@@ -204,7 +235,14 @@ impl MeshTransport for IrohMeshTransport {
         remote_agent: &str,
     ) -> anyhow::Result<IrohMoqSession> {
         holochain_moq_mesh::Source::check_agent(remote_agent)?;
-        IrohMoqSession::establish(link, role, remote_agent, &self.publish).await
+        IrohMoqSession::establish(
+            link,
+            role,
+            remote_agent,
+            &self.publish,
+            self.reliable_max_age,
+        )
+        .await
     }
 
     fn reject(&self, link: Connection, reason: RejectReason) {
@@ -239,7 +277,7 @@ impl MeshTransport for IrohMeshTransport {
         let producer = bc
             .create_track(
                 path.track.as_str(),
-                track::track_info(mode, self.latest_carrier),
+                track::track_info(mode, self.latest_carrier, self.reliable_max_age),
             )
             .with_context(|| format!("create track {path}"))?;
         Ok(Box::new(track::Sink::new(

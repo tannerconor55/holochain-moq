@@ -16,9 +16,10 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use bytes::Bytes;
 use holochain_moq_mesh::{
-    DeliveryMode, MeshObject, PublisherStats, SubscriptionStats, TrackSink, TrackSource,
-    LATEST_QUEUE, RELIABLE_MAX_AGE, RELIABLE_QUEUE,
+    DeliveryMode, HistoryUnavailable, MeshObject, PublisherStats, SubscriptionStats, TrackSink,
+    TrackSource, LATEST_QUEUE, RELIABLE_QUEUE,
 };
+use iroh::endpoint::Connection;
 use moq_net::track::Subscription;
 use moq_net::{group, track, Timestamp};
 use tokio::sync::{mpsc, Notify};
@@ -42,8 +43,13 @@ pub enum LatestCarrier {
     StreamPerObject,
 }
 
-/// moq-net track metadata per mode.
-pub(crate) fn track_info(mode: DeliveryMode, carrier: LatestCarrier) -> track::Info {
+/// moq-net track metadata per mode. `reliable_max_age` is how long reliable
+/// history is retained (default `RELIABLE_MAX_AGE`; WP6 tests shorten it).
+pub(crate) fn track_info(
+    mode: DeliveryMode,
+    carrier: LatestCarrier,
+    reliable_max_age: Duration,
+) -> track::Info {
     let mut info = track::Info::default();
     match mode {
         DeliveryMode::Latest => {
@@ -54,20 +60,20 @@ pub(crate) fn track_info(mode: DeliveryMode, carrier: LatestCarrier) -> track::I
             info.priority = 200; // state preempts bulk
         }
         DeliveryMode::ReliableOrdered => {
-            info.max_age = RELIABLE_MAX_AGE;
+            info.max_age = reliable_max_age;
             info.priority = 250; // events preempt state
         }
     }
     info
 }
 
-pub(crate) fn subscription(mode: DeliveryMode) -> Subscription {
+pub(crate) fn subscription(mode: DeliveryMode, reliable_max_age: Duration) -> Subscription {
     match mode {
         DeliveryMode::Latest => Subscription::default(),
         // On the IETF wire a subscription is a live join at the publisher's
         // current group (moq-net ietf/subscriber.rs `subscribe_join`); earlier
         // groups are fetched explicitly by the reader (`fetch_group`).
-        DeliveryMode::ReliableOrdered => Subscription::default().with_max_age(RELIABLE_MAX_AGE),
+        DeliveryMode::ReliableOrdered => Subscription::default().with_max_age(reliable_max_age),
     }
 }
 
@@ -153,12 +159,31 @@ impl Drop for Sink {
 pub(crate) enum End {
     Finished,
     Lost(String),
+    /// WP6: a reliable object the reader needs is not available (evicted
+    /// history, or a group that never arrived). Never skipped.
+    HistoryGap {
+        next_seq: u64,
+        reason: String,
+    },
 }
 
 fn end_result(e: &End) -> anyhow::Result<Option<MeshObject>> {
     match e {
         End::Finished => Ok(None),
         End::Lost(m) => Err(anyhow!("track lost: {m}")),
+        End::HistoryGap { next_seq, reason } => Err(anyhow::Error::new(HistoryUnavailable {
+            next_seq: *next_seq,
+            reason: reason.clone(),
+        })),
+    }
+}
+
+/// A track that "finished" because its session went away is a loss, not an
+/// end chosen by the publisher (WP6: the mesh reconnects on a loss).
+fn settle(end: End, conn: &Connection) -> End {
+    match (&end, conn.close_reason()) {
+        (End::Finished, Some(reason)) => End::Lost(format!("session closed: {reason}")),
+        _ => end,
     }
 }
 
@@ -290,8 +315,9 @@ impl TrackSource for Source {
 }
 
 /// A subscription whose moq-net subscriber is produced by `open` (inside the
-/// reader task, so `subscribe` never blocks on the network).
-pub(crate) fn spawn_reader<F>(open: F, mode: DeliveryMode) -> Source
+/// reader task, so `subscribe` never blocks on the network). `ReliableOrdered`
+/// starts at object `start` (0 = from the beginning; WP6 resume otherwise).
+pub(crate) fn spawn_reader<F>(open: F, mode: DeliveryMode, start: u64, conn: Connection) -> Source
 where
     F: std::future::Future<Output = anyhow::Result<(track::Consumer, track::Subscriber)>>
         + Send
@@ -309,7 +335,7 @@ where
                     Ok((_, sub)) => read_latest(sub, &q).await,
                     Err(e) => End::Lost(format!("{e:#}")),
                 };
-                q.end(end);
+                q.end(settle(end, &conn));
             });
             Source {
                 rx: Rx::Latest(shared),
@@ -324,10 +350,10 @@ where
             let s = shared.clone();
             let task = tokio::spawn(async move {
                 let end = match open.await {
-                    Ok((consumer, sub)) => read_reliable(consumer, sub, &tx, &s).await,
+                    Ok((consumer, sub)) => read_reliable(consumer, sub, &tx, &s, start).await,
                     Err(e) => End::Lost(format!("{e:#}")),
                 };
-                let _ = tx.send(Err(end)).await;
+                let _ = tx.send(Err(settle(end, &conn))).await;
             });
             Source {
                 rx: Rx::Reliable {
@@ -381,21 +407,37 @@ async fn read_reliable(
     mut sub: track::Subscriber,
     tx: &mpsc::Sender<Result<MeshObject, End>>,
     shared: &ReliableShared,
+    start: u64,
 ) -> End {
-    let mut expected: u64 = 0;
-    let mut pending: BTreeMap<u64, group::Consumer> = BTreeMap::new();
+    let g_size = RELIABLE_GROUP_OBJECTS;
+    let mut expected: u64 = start / g_size;
+    // Objects of the first group already delivered on an earlier session.
+    let mut skip = start % g_size;
+    // Group -> (consumer, came from history via fetch).
+    let mut pending: BTreeMap<u64, (group::Consumer, bool)> = BTreeMap::new();
+    let gap = |group: u64, skip: u64, reason: String| End::HistoryGap {
+        next_seq: (group * g_size + skip).max(start),
+        reason,
+    };
     loop {
-        if let Some(mut g) = pending.remove(&expected) {
+        if let Some((mut g, fetched)) = pending.remove(&expected) {
             let mut index = 0u64;
             loop {
                 match g.read_frame().await {
                     Ok(Some(f)) => {
-                        let seq = expected * RELIABLE_GROUP_OBJECTS + index;
+                        let seq = expected * g_size + index;
                         index += 1;
+                        if index <= skip {
+                            shared.stats.lock().unwrap().duplicates += 1;
+                            continue;
+                        }
                         {
                             let mut st = shared.stats.lock().unwrap();
                             st.received += 1;
                             st.newest_seq = Some(seq);
+                            if fetched {
+                                st.replayed += 1;
+                            }
                         }
                         if tx
                             .send(Ok(MeshObject {
@@ -412,17 +454,30 @@ async fn read_reliable(
                     Err(e) => return End::Lost(format!("group {expected}: {e}")),
                 }
             }
-            if index < RELIABLE_GROUP_OBJECTS {
+            if index < skip {
+                return gap(
+                    expected,
+                    index,
+                    format!("group {expected} holds {index} objects, resume needs {skip}"),
+                );
+            }
+            skip = 0;
+            if index < g_size {
                 // Only the publisher's last group may be short: the track must end next.
-                match sub.recv_group().await {
-                    Ok(None) => return End::Finished,
-                    Ok(Some(g)) => {
-                        return End::Lost(format!(
-                            "group {expected} ended after {index} objects but group {} followed",
-                            g.sequence
-                        ))
+                loop {
+                    match sub.recv_group().await {
+                        Ok(None) => return End::Finished,
+                        Ok(Some(g)) if g.sequence <= expected => {
+                            // The live join re-delivered a group we already read.
+                            shared.stats.lock().unwrap().duplicates += 1;
+                        }
+                        Ok(Some(g)) => {
+                            let next = g.sequence;
+                            let why = format!("group {expected} ended after {index} objects");
+                            return End::Lost(format!("{why} but group {next} followed"));
+                        }
+                        Err(e) => return End::Lost(e.to_string()),
                     }
-                    Err(e) => return End::Lost(e.to_string()),
                 }
             }
             expected += 1;
@@ -433,24 +488,28 @@ async fn read_reliable(
         if pending.keys().next().is_some_and(|first| *first > expected) {
             match consumer.fetch_group(expected, None).await {
                 Ok(g) => {
-                    pending.insert(expected, g);
+                    pending.insert(expected, (g, true));
                     continue;
                 }
                 Err(e) => {
-                    return End::Lost(format!("history gap: group {expected} unavailable: {e}"))
+                    return gap(
+                        expected,
+                        skip,
+                        format!("group {expected} no longer in the publisher's history: {e}"),
+                    )
                 }
             }
         }
         match sub.recv_group().await {
             Ok(Some(g)) if g.sequence < expected => shared.stats.lock().unwrap().duplicates += 1,
             Ok(Some(g)) => {
-                pending.insert(g.sequence, g);
+                pending.insert(g.sequence, (g, false));
                 if pending.len() > RELIABLE_MAX_PENDING_GROUPS {
-                    return End::Lost(format!("history gap: group {expected} never arrived"));
+                    return gap(expected, skip, format!("group {expected} never arrived"));
                 }
             }
             Ok(None) if pending.is_empty() => return End::Finished,
-            Ok(None) => return End::Lost(format!("history gap: group {expected} missing at end")),
+            Ok(None) => return gap(expected, skip, format!("group {expected} missing at end")),
             Err(e) => return End::Lost(e.to_string()),
         }
     }
