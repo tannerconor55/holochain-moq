@@ -9,6 +9,71 @@ use moq_net::origin;
 
 use crate::{spawn_driver, track, versions};
 
+/// The web-transport session moq-net drives, with one change: `close` is a
+/// no-op once the connection is already closed. noq's `Connection::close`
+/// overwrites the recorded close reason with `LocallyClosed`, so moq-net
+/// closing its side in reaction to the peer's close would erase the peer's
+/// application code - the only way to tell a deliberate leave (`LEAVE_CODE`)
+/// from an abort that must be reconnected (`ABORT_CODE`). A closed connection
+/// sends nothing more, so skipping the call changes nothing on the wire.
+#[derive(Clone)]
+struct ClosePreserving {
+    inner: web_transport_iroh::Session,
+    conn: Connection,
+}
+
+impl web_transport_trait::Session for ClosePreserving {
+    type SendStream = <web_transport_iroh::Session as web_transport_trait::Session>::SendStream;
+    type RecvStream = <web_transport_iroh::Session as web_transport_trait::Session>::RecvStream;
+    type Error = <web_transport_iroh::Session as web_transport_trait::Session>::Error;
+
+    async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+        web_transport_trait::Session::accept_uni(&self.inner).await
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+        web_transport_trait::Session::accept_bi(&self.inner).await
+    }
+
+    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+        web_transport_trait::Session::open_bi(&self.inner).await
+    }
+
+    async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+        web_transport_trait::Session::open_uni(&self.inner).await
+    }
+
+    fn close(&self, code: u32, reason: &str) {
+        if self.conn.close_reason().is_none() {
+            web_transport_trait::Session::close(&self.inner, code, reason);
+        }
+    }
+
+    async fn closed(&self) -> Self::Error {
+        web_transport_trait::Session::closed(&self.inner).await
+    }
+
+    fn send_datagram(&self, data: bytes::Bytes) -> Result<(), Self::Error> {
+        web_transport_trait::Session::send_datagram(&self.inner, data)
+    }
+
+    async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
+        web_transport_trait::Session::recv_datagram(&self.inner).await
+    }
+
+    fn max_datagram_size(&self) -> usize {
+        web_transport_trait::Session::max_datagram_size(&self.inner)
+    }
+
+    fn protocol(&self) -> Option<&str> {
+        web_transport_trait::Session::protocol(&self.inner)
+    }
+
+    fn stats(&self) -> impl web_transport_trait::Stats {
+        web_transport_trait::Session::stats(&self.inner)
+    }
+}
+
 /// One MoQ session (both roles) over one iroh connection.
 /// Application close code of a deliberate leave (also what iroh's
 /// `Endpoint::close` sends). Anything else ending a session is a loss.
@@ -21,8 +86,6 @@ pub struct IrohMoqSession {
     conn: Connection,
     session: moq_net::Session,
     reliable_max_age: std::time::Duration,
-    /// The mesh closed or aborted this session itself.
-    closed_here: std::sync::atomic::AtomicBool,
     /// The remote's broadcasts arrive here; a subscription reads only the one
     /// broadcast its path names.
     subscribe: origin::Producer,
@@ -49,9 +112,10 @@ impl IrohMoqSession {
             Role::Dialer => {
                 // moq-net is poll-only; web-transport-iroh 0.7 is async-only,
                 // so it goes through moq-tokio's adapter (as the WP1 spike did).
-                let wt = moq_tokio::transport::Session::new(web_transport_iroh::Session::raw(
-                    conn.clone(),
-                ));
+                let wt = moq_tokio::transport::Session::new(ClosePreserving {
+                    inner: web_transport_iroh::Session::raw(conn.clone()),
+                    conn: conn.clone(),
+                });
                 moq_net::Client::new()
                     .with_stats(stats)
                     .with_versions(versions())
@@ -62,9 +126,10 @@ impl IrohMoqSession {
                     .context("moq client handshake")?
             }
             Role::Acceptor => {
-                let wt = moq_tokio::transport::Session::new(
-                    web_transport_iroh::QuicRequest::accept(conn.clone()).ok(),
-                );
+                let wt = moq_tokio::transport::Session::new(ClosePreserving {
+                    inner: web_transport_iroh::QuicRequest::accept(conn.clone()).ok(),
+                    conn: conn.clone(),
+                });
                 moq_net::Server::new()
                     .with_stats(stats)
                     .with_versions(versions())
@@ -81,7 +146,6 @@ impl IrohMoqSession {
             conn,
             session,
             reliable_max_age,
-            closed_here: std::sync::atomic::AtomicBool::new(false),
             subscribe,
         })
     }
@@ -188,36 +252,26 @@ impl TransportSession for IrohMoqSession {
     }
 
     fn close(&self) {
-        self.closed_here
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.conn
             .close(VarInt::from_u32(LEAVE_CODE), b"mesh session closed");
     }
 
     fn abort(&self) {
-        self.closed_here
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.conn
             .close(VarInt::from_u32(ABORT_CODE), b"mesh session aborted");
     }
 
-    /// A leave is the peer's code-0 close. The peer's close frame can arrive
-    /// just after this side's MoQ stack, reacting to the same teardown, has
-    /// already closed the connection locally; QUIC then records
-    /// `LocallyClosed`, but the received close frame is still counted. A
-    /// local close the mesh did not make, after the peer sent a close frame,
-    /// is therefore a leave too. Timeouts, resets and path failures carry no
-    /// close frame from the peer and stay losses.
+    /// A leave is exactly the peer's code-0 close. The peer's close reason is
+    /// kept intact because this side's MoQ stack never closes an already
+    /// closed connection ([`ClosePreserving`]); anything else (an abort, a
+    /// timeout, a reset, a path failure, or this side closing first) is a loss.
     fn end_reason(&self) -> SessionEnd {
-        let peer_closed = self.conn.stats().frame_rx.connection_close > 0;
-        let ours = self.closed_here.load(std::sync::atomic::Ordering::SeqCst);
         match self.conn.close_reason() {
             Some(ConnectionError::ApplicationClosed(c))
                 if c.error_code == VarInt::from_u32(LEAVE_CODE) =>
             {
                 SessionEnd::Left
             }
-            Some(ConnectionError::LocallyClosed) if peer_closed && !ours => SessionEnd::Left,
             Some(e) => SessionEnd::Lost(e.to_string()),
             None => SessionEnd::Lost("MoQ session ended".into()),
         }

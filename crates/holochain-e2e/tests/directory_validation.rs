@@ -748,8 +748,14 @@ async fn registry_governance_is_enforced_by_the_directory() {
     let claims: Vec<GameSummary> = net.conductors[BOB]
         .call(&net.zome(BOB), "find_games", "turbo-kart".to_string())
         .await;
-    let mut want = vec![alice.clone(), bob.clone()];
-    want.sort();
+    // The zome orders by the link tag: the developer's raw 39-byte key
+    // (`developer_tag`), not its base64 text, whose order can differ.
+    let mut by_raw = vec![
+        (alice_key.get_raw_39().to_vec(), alice.clone()),
+        (bob_key.get_raw_39().to_vec(), bob.clone()),
+    ];
+    by_raw.sort();
+    let want: Vec<_> = by_raw.into_iter().map(|(_, k)| k).collect();
     assert_eq!(
         claims
             .iter()

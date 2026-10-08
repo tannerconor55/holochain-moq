@@ -3099,6 +3099,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "web-transport-iroh",
+ "web-transport-trait 0.4.0",
 ]
 
 [[package]]

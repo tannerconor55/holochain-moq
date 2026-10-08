@@ -19,6 +19,10 @@ moq-net = { workspace = true }
 moq-tokio = { workspace = true }
 iroh = { workspace = true }
 web-transport-iroh = { workspace = true }
+# The session trait web-transport-iroh implements (already in the tree via
+# web-transport-iroh 0.7): `ClosePreserving` wraps it so a peer's close code
+# survives this side's MoQ teardown.
+web-transport-trait = "0.4"
 
 tokio = { workspace = true }
 async-trait = { workspace = true }

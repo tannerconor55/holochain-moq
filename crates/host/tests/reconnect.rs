@@ -294,14 +294,29 @@ async fn a_long_outage_migrates_and_the_returning_old_host_stays_deposed() -> Re
         prev_epoch: 1,
         prev_host: agent(0),
     })?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Wait (bounded) until each follower has rejected both forged claims,
+    // rather than counting after a fixed sleep: the claims travel the old
+    // host's just-resumed control track and may take a moment to arrive.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut rejected = Vec::new();
-    for (i, n) in nodes.iter_mut().enumerate().skip(1) {
-        for e in drain(&mut n.events) {
-            if let HostEvent::ClaimRejected { reason, .. } = e {
-                rejected.push((i, reason));
+    loop {
+        for (i, n) in nodes.iter_mut().enumerate().skip(1) {
+            for e in drain(&mut n.events) {
+                if let HostEvent::ClaimRejected { reason, .. } = e {
+                    rejected.push((i, reason));
+                }
             }
         }
+        let per = |f: usize| rejected.iter().filter(|(i, _)| *i == f).count();
+        if per(1) >= 2 && per(2) >= 2 {
+            break;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "both followers did not reject both claims within 5 s: rejected {rejected:?}, authority {:?}",
+            authority_everywhere(&nodes)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     ensure!(
         authority_everywhere(&nodes)

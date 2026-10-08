@@ -1459,12 +1459,16 @@ Connecting ─▶ Connected ──(session lost)──▶ Disconnected ─▶ Wa
   mesh's own close, and what iroh's `Endpoint::close` sends) is a deliberate **leave**.
   The leaving mesh closes its endpoint first (`Endpoint::close` closes every connection
   with code 0 and retransmits until acknowledged) and only then tears the rest down.
-  On the receiving side the peer's close frame can land just after its own MoQ stack,
-  reacting to the same teardown, closed the connection locally; QUIC then records
-  `LocallyClosed` but still counts the received close frame, so a local close the mesh
-  did not make, after a received close frame, is also a leave (measured: before this
-  rule ~40 % of leaves in a 4-peer mesh were misread as losses; after it 72/72 leaves and
-  10/10 WP2 removal runs correct). A leave is:
+  **The peer's close code is authoritative**: code 0 is a leave; any other peer close
+  (e.g. an abort, 0x4d10) is a loss and the peer stays reconnectable. Local teardown
+  must not overwrite that code: noq's `Connection::close` replaces the recorded reason
+  with `LocallyClosed`, and moq-net closes its side in reaction to the peer's close, so
+  mesh-iroh hands moq-net a session whose `close` is a no-op once the connection is
+  already closed (`ClosePreserving`; nothing more is sent on a closed connection). An
+  earlier rule that read "local close after a received close frame" as a leave also
+  misread some aborts as leaves (the peer was then never reconnected); it was replaced
+  by this. Measured: 30/30 leaves and 30/30 aborts classified correctly
+  (`transport.rs`), WP2 removal 20/20. A leave is:
   `PeerLeft` at once, no reconnect (the WP2 removal behaviour). Anything else (a forced
   close, reset, idle timeout after 10 s of silence, path loss) is a **loss**:
   `PeerDisconnected` → `Reconnecting` → `ReconnectSucceeded` or `ReconnectGiveUp` +
@@ -1573,9 +1577,8 @@ old one (`Stale`) are rejected. Exactly one host and one AI publisher remain.
   behaviour). Publishers must live for the race.
 - **Leave detection rests on the close frame.** A leave whose close frame never arrives
   (lost on a real network, process killed) is a loss: reconnect, then `PeerLeft` after
-  the give-up window. Conversely a peer's *abort* (code 0x4d10) caught in the same race
-  as above would read as a leave; the mesh only aborts superseded half-open sessions and
-  the `sever` test hook, so this was not observed in the tests.
+  the give-up window. If this side closes the connection *before* the peer's close frame
+  is processed, the peer's code is unknown and the end is a loss (never a false leave).
 - **An EndpointId change is not a reconnect**: the roster is fixed at race setup; a peer
   that restarts with a new key needs a new roster (WP7 presence + race setup).
 - **A deposed host is never re-elected** in the same race even after reconnecting (WP5 rule).

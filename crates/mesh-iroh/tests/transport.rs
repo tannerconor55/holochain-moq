@@ -108,3 +108,47 @@ async fn one_link_carries_both_modes_both_ways() -> Result<()> {
     b.close().await;
     Ok(())
 }
+
+/// WP6 leave detection: the receiving side classifies a session end by the
+/// peer's close code alone - code 0 is a leave, an abort is a loss to
+/// reconnect - including after its own MoQ stack has torn down in reaction
+/// (noq's local `close` used to overwrite the peer's code with
+/// `LocallyClosed`, so some aborts were read as leaves and the peer was
+/// never reconnected).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_peer_close_code_alone_decides_leave_versus_loss() -> Result<()> {
+    use holochain_moq_mesh::SessionEnd;
+    let a = IrohMeshTransport::bind(IrohConfig::new(Reach::DirectOnly), "agentA").await?;
+    let b = IrohMeshTransport::bind(IrohConfig::new(Reach::DirectOnly), "agentB").await?;
+    let b_addr = b.addr(Duration::from_secs(1)).await;
+    const ROUNDS: usize = 30;
+    let (mut left, mut lost) = (0, 0);
+    for round in 0..2 * ROUNDS {
+        let leave = round % 2 == 0;
+        let (a_link, b_link) = tokio::join!(a.dial(&b_addr), async { b.accept().await.unwrap() });
+        let (sa, sb) = tokio::join!(
+            a.establish(a_link?, Role::Dialer, "agentB"),
+            b.establish(b_link?, Role::Acceptor, "agentA")
+        );
+        let (sa, sb) = (sa?, sb?);
+        if leave {
+            sa.close();
+        } else {
+            sa.abort();
+        }
+        tokio::time::timeout(Duration::from_secs(5), sb.closed()).await?;
+        // Let B's own MoQ stack finish reacting to the teardown first.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        match (leave, sb.end_reason()) {
+            (true, SessionEnd::Left) => left += 1,
+            (false, SessionEnd::Lost(_)) => lost += 1,
+            (leave, end) => anyhow::bail!("round {round}: leave={leave} classified {end:?}"),
+        }
+    }
+    println!(
+        "[wp6 leave detection] {left}/{ROUNDS} leaves as Left, {lost}/{ROUNDS} aborts as Lost"
+    );
+    a.close().await;
+    b.close().await;
+    Ok(())
+}
