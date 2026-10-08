@@ -646,7 +646,7 @@ never calls a directory or Holochain, before or during delivery.
     subscriptions over it end.
   - `ConnectionKindChanged` comes from polling the selected iroh path every
     500 ms.
-  - `Reconnecting` is defined but never emitted (WP6).
+  - `Reconnecting` is defined but never emitted (WP6). *(WP6: now emitted; see "Reconnect and recovery (WP6)".)*
 - **Timeouts.** QUIC idle timeout 10 s, keep-alive 4 s.
 
 ### Test scopes (kept distinct on purpose)
@@ -783,7 +783,7 @@ is not included.
   queued. No adaptive rate.
 - **Datagram size is not probed per path.** `LATEST_MAX_PAYLOAD` (1024 B) is
   a static bound.
-- **No reconnect (WP6), no authorization (WP8), no rate limits (WP9).** A peer
+- **No reconnect (WP6, since done), no authorization (WP8), no rate limits (WP9).** A peer
   could still flood a reader's queue, which stays bounded, or open
   subscriptions to tracks that never exist; those queue in moq-net's
   `Dynamic` and are unbounded per hostile peer.
@@ -978,7 +978,7 @@ has no dependency on iroh, MoQ, TLS, Holochain or kart-wire, which
   QUIC-over-TCP head-of-line stalls (WP3: p99 ~0.6 s at 5 %) delay heartbeats. A stall
   longer than `failure_timeout` would look like a failure and trigger a migration. The
   default 2 s leaves margin over what was measured; this is not fixed here.
-- **No rejoin.** A failed or deposed host is never re-elected in the same race (WP6).
+- **No rejoin.** A failed or deposed host is never re-elected in the same race. (WP6 reconnects its *session*; it still never regains authority, see "Reconnect and recovery (WP6)".)
   The responder side of the clock (WP4) and the host's subscriptions cover the peers
   connected at setup.
 - **Ex-host producers stay idle, not removed.** An ex-host keeps its AI track producers
@@ -1187,7 +1187,7 @@ directory or Holochain at all.
   window and hide later joiners (no rate limit until WP9).
 - **No hardening or rate limits yet (WP9):** join attempts, result spam and status spam
   are not rate-limited.
-- **No reconnect (WP6).**
+- **No reconnect (WP6).** *(Since WP6 the mesh reconnects; this WP7 note predates it.)*
 - **Real-conductor tests are in-process sweettest conductors** on one machine over
   loopback websockets; no real Internet, NAT or multi-machine validation.
 
@@ -1221,7 +1221,7 @@ the agreed direction.
                                                         │
                                                         ▼
                          game-net: mesh · Latest · ReliableOrdered · clock · host authority
-                                   · (reconnect WP6) · (admission hooks WP8) · identity binding
+                                   · reconnect (WP6) · (admission hooks WP8) · identity binding
                                                         │
                                                         ▼
                                     MoQ (moq-net, draft-16) over iroh/QUIC
@@ -1384,7 +1384,7 @@ key rotation.
 Already generic, and kept that way by tests: `mesh` (sessions, roster, identity binding,
 `Latest`, `ReliableOrdered`), `mesh-iroh` (transport), `clock` (host-relative time,
 scheduled start), `host` (authority, epochs, election, migration, host-owned streams).
-Planned additions in the same layer: reconnect (WP6), admission hooks (WP8), hardening
+Added since: reconnect (WP6). Planned in the same layer: admission hooks (WP8), hardening
 (WP9). Turbo Kart-specific: `kart-wire`, the lobby control plane, and the future
 `kart-net` adapter that joins them.
 
@@ -1433,3 +1433,133 @@ crates unable to depend on Holochain or a game's control plane.
 - **Launch isolation**: the game process gets an app interface token for its own app;
   OS-level sandboxing of game executables is out of scope.
 - **`race/` and `ai-` wire names** stay until a deliberate wire version bump.
+
+## Reconnect and recovery (WP6)
+
+Realtime recovery lives entirely in the data plane: `crates/mesh` (generic state machine,
+backoff, self-healing subscriptions) and `crates/mesh-iroh` (how a session ended, resumable
+readers). Holochain is not involved: the roster (AgentPubKey → iroh EndpointId) from race
+setup is all a reconnect needs, and the counted WP7 race test asserts zero Holochain calls
+across a forced reconnect.
+
+### Per-peer state machine
+
+```text
+Connecting ─▶ Connected ──(session lost)──▶ Disconnected ─▶ Waiting ⇄ Dialing ─▶ Authenticating ─▶ Connected
+                  │                                           └──(15 s since the loss)──▶ GaveUp ─▶ PeerLeft
+                  └──(remote closed deliberately)──▶ Left ─▶ PeerLeft
+```
+
+- **Loss vs leave.** A session ended by the remote with application close code 0 (the
+  mesh's own close, and what iroh's `Endpoint::close` sends) is a deliberate **leave**:
+  `PeerLeft` at once, no reconnect (the WP2 removal behaviour). Anything else (a forced
+  close, reset, idle timeout after 10 s of silence, path loss) is a **loss**:
+  `PeerDisconnected` → `Reconnecting` → `ReconnectSucceeded` or `ReconnectGiveUp` +
+  `PeerLeft`. A transport failure never looks like a membership removal until the
+  give-up window has passed.
+- **One session per pair, same rule as WP2.** Only the designated dialer (the lower
+  `AgentPubKey`) re-dials; the other side waits. If the acceptor still holds a half-open
+  old session when the dialer's new link arrives, the new, fully authenticated link
+  supersedes it. With `DialPolicy::BothDial` both sides re-dial at once and the
+  tie-break refuses the higher side's link (`WrongDirection`), so it still converges to
+  one session.
+- **Backoff** (`ReconnectConfig`, all configurable): 250 ms, doubling, capped at 4 s,
+  give up 15 s after the loss (about 6 attempts if the peer never returns); each attempt
+  is bounded by 3 s; optional deterministic jitter (default 0). The backoff resets after
+  every success.
+- **Identity on every attempt.** A reconnect runs the same checks as the first
+  connection: the dialed EndpointId must answer (iroh authenticates the key in the
+  handshake), and an incoming link must authenticate as the EndpointId the roster binds
+  to that agent. Same address ≠ same player: a different key at the old address never
+  completes a handshake for the expected EndpointId; a non-member or an endpoint claiming
+  another agent's name is `NotMember`.
+- **Events and stats.** `PeerDisconnected`, `Reconnecting` (once per outage),
+  `ReconnectFailed` (per attempt, with the next delay), `ReconnectSucceeded` (the logical
+  counterpart of `PeerJoined`; no second `PeerJoined`), `ReconnectGiveUp`. `peers()` adds
+  `state` and `reconnect` (disconnects, attempts, successes, failures, give-ups, last
+  outage, current backoff, last disconnect reason).
+
+### Subscriptions that survive a reconnect
+
+`TrackSubscription` keeps working across sessions: when its source fails because the
+session was lost, the next `recv` waits for the mesh to reconnect and re-subscribes on
+the new session. Callers keep `publish` / `subscribe` / `recv` unchanged (WP5's host
+layer needed no change). Subscribing to a peer that is mid-reconnect returns a
+subscription that starts on the next session; a peer that left or gave up ends it with
+`PeerGone`.
+
+- **`Latest`**: a new subscription only ever delivers new state, and the subscription
+  discards anything not newer than what it already delivered. The first object after a
+  reconnect is the newest state available: in the test, 45 states published during a
+  1.5 s outage, none replayed, first state after reconnect = current + 2 in flight.
+  The 4-deep queue bound is unchanged.
+- **`ReliableOrdered`**: resumes at the next undelivered sequence number. The reader
+  starts at that object's 64-object group (fetched from history if it is no longer the
+  live one), discards objects already delivered (counted as duplicates), and the
+  subscription checks every object is exactly the next one: a gap is
+  `MeshError::SequenceGap`, a resume point the publisher no longer holds is
+  `MeshError::HistoryExpired`. Both are final; nothing after a gap is ever delivered.
+- **Publishers** are untouched by subscriber churn: the publish origin serves every
+  current and future session; reliable history is the bounded WP3 history.
+
+### Bugs found on the way (fixed)
+
+- **Reliable history lived 30 s, not 30 min.** moq-net's default origin reclaims any
+  cached group nobody read or wrote for 30 s, whatever the track advertises (`max_age`
+  is a media-timestamp bound on delivery, not on caching). WP3's "late joiners replay
+  from race start" therefore only held for ~30 s of idle history. The publish origin's
+  pool now uses the configured reliable retention as its idle window
+  (`IrohConfig::reliable_max_age`, default 30 min) and a 64 MiB byte target; expiry or
+  pressure eviction surfaces as `HistoryExpired`, never as a gap.
+- **Jitter seeds collided** (xorshift did not diffuse low bits): replaced with the
+  splitmix64 finalizer; caught by a unit test.
+- Investigated and *not* a WP6 bug: a subscriber to a track whose publisher was already
+  dropped waits forever (moq-net queues the lookup as a request for a "new" track). In
+  a race, publishers live for the race; the tests now keep them alive. Listed below.
+
+### Interaction with host migration (WP5)
+
+WP5's heartbeat / failure-timeout rules stay authoritative. A reconnect is typically
+~255 ms (250 ms first backoff + handshake), well inside the 2 s `failure_timeout`, so a
+transient loss never migrates the host (tested for a non-host peer and for the host's
+links). An outage longer than `failure_timeout` migrates as in WP5; when the old host's
+session comes back, its resumed reliable control track delivers the newer
+`HostChanged`, it steps down, and its claims at the current epoch (`FailedHost`) or an
+old one (`Stale`) are rejected. Exactly one host and one AI publisher remain.
+
+### Measured (loopback / in-process relay / netem; one process)
+
+| Measurement | Result |
+|---|---|
+| Reconnect after forced close, direct | 255 ms (soak median 255, p95 257, max 257 ms over 20 cycles) |
+| Reconnect after forced close, relay-only (local relay) | 256 ms |
+| Reconnect at 2 % / 5 % netem (direct) | 256 / 316 ms |
+| Simultaneous reconnect, both sides dialing (10 rounds) | median 257, max 258 ms; 1 session, 1 `ReconnectSucceeded` per side every round |
+| `Latest` first new state after the reconnect event | 34–36 ms |
+| `ReliableOrdered` replay of 300 missed events (348 objects from history) | 15 ms |
+| Soak, 20 forced reconnects, 30 Hz state + 10 Hz events | no gap, no duplicate delivered; background tasks 2 → 2 per side; RSS +260–276 KB; CPU 6.6 % of one core vs 5.0 % for the same traffic without reconnects |
+| Host flap shorter than `failure_timeout` | no migration; AI back 29 ms after reconnect |
+| Host partitioned 3 s (failure_timeout 1 s) | new host after 947 ms; old host back at 3006 ms, stepped down at 3028 ms |
+
+### Known limitations (WP6)
+
+- **Not tested on the real Internet, through NAT, or between machines.** Loopback, an
+  in-process relay and netem only. iroh's path changes (relay ↔ direct, NAT rebinding)
+  are not exercised; real outages may look different (e.g. no CONNECTION_CLOSE, only the
+  10 s idle timeout before recovery starts).
+- **A silent peer is noticed only after the 10 s QUIC idle timeout** (4 s keep-alive),
+  then the 15 s give-up window starts: up to ~25 s before `PeerLeft`. WP5 heartbeats
+  detect a silent host in 2 s independently.
+- **Resume is group-granular**: the resumed reader re-reads the current 64-object group
+  and discards what was already delivered (591–605 discarded in the soak). Correct, but
+  some extra bytes per reconnect.
+- **History is bounded**: 30 min idle retention (configurable), a 64 MiB cache target per
+  endpoint, and WP3's per-track caps. Beyond them a reconnect fails explicitly with
+  `HistoryExpired`; the game must then resynchronise (not done here).
+- **A late subscriber to a track whose publisher was dropped hangs** (moq-net 0.3.10
+  behaviour). Publishers must live for the race.
+- **An EndpointId change is not a reconnect**: the roster is fixed at race setup; a peer
+  that restarts with a new key needs a new roster (WP7 presence + race setup).
+- **A deposed host is never re-elected** in the same race even after reconnecting (WP5 rule).
+- **Hostile peers (WP8/WP9)**: a roster member could force reconnect churn on its own
+  sessions; there is no rate limit on reconnect attempts by the remote yet.

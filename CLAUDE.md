@@ -304,7 +304,7 @@ These are known and should not be accidentally reimplemented as part of unrelate
 * encoder pipeline introduces recovery latency
 * hostile peers can still cause `moq-transport` object buffering
 * V4L2 currently targets YUYV
-* no reconnect (media stack: `node::reconnect` covers subscriber reconnects only; mesh: none, WP6)
+* media stack reconnect: `node::reconnect` covers subscriber reconnects only. The game mesh reconnects since WP6 (loopback / local relay / netem only; real Internet/NAT reconnect untested)
 * media stack: no relay/NAT traversal; mesh: iroh relay works on loopback, real NAT traversal untested
 * no adaptive bitrate
 * no production capture-device matrix

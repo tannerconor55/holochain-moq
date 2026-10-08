@@ -30,7 +30,8 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | WP4 | Host-relative clock estimation (NTP 4-timestamp samples over `Latest`, robust estimator) and race-start scheduling | **done, tested locally** (loopback direct, local relay, netem 2/5 %, simulated clock skew) - `crates/clock`. **Not validated on a real network** |
 | WP5 | Host authority: epochs, deterministic election, heartbeat failure detection, host-owned AI tracks, migration with resume, stale-epoch rejection | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/host`. **Not tested on the real Internet or between machines** |
 | WP7 | Lobby control plane in the DNA: lobbies, membership, characters, host-only status, self-reported results, leaderboards, expiring iroh presence | **done, tested on real conductors** (in-process sweettest, two and three conductors, loopback websockets) - `dna/`, `crates/protocol/src/lobby.rs`, `crates/hdk-bridge/src/lobby.rs`. **Not tested between machines or over the Internet** |
-| WP6 / WP8 / WP9 / WP10 | Reconnect / track admission / hardening and rate limits / Tauri bridge | **not started** |
+| WP6 | Reconnect and recovery: per-peer state machine, 250 ms → 4 s backoff with a 15 s give-up, re-authenticated sessions, self-healing subscriptions (`Latest` resumes at current state, `ReliableOrdered` resumes without gap or duplicate or fails with `HistoryExpired`) | **done, tested in-process** (direct, local relay, netem 0/2/5 %) - `crates/mesh`, `crates/mesh-iroh`. **Real Internet / NAT reconnect not tested** |
+| WP8 / WP9 / WP10 | Track admission / hardening and rate limits / Tauri bridge | **not started** |
 | Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
@@ -830,7 +831,7 @@ say nothing about Internet latency, and the relay is local.
 - **Not tested on real networks.** Loopback and an in-process relay only; no
   NAT traversal, no hole punching, and no relay->direct upgrade observed. The
   WP1 manual two-network test is still outstanding.
-- **No reconnect.** A lost peer emits `PeerLeft` and stays gone (WP6).
+- **No reconnect.** A lost peer emits `PeerLeft` and stays gone (WP6). *(Fixed by WP6: lost sessions reconnect; only a deliberate leave or a give-up is `PeerLeft`.)*
   Initial dialing retries up to 5 times, 200 ms apart, then emits
   `DialFailed`. A peer that crashes without closing is released only by the
   10 s idle timeout. That case was not measured; the removal test uses a
@@ -927,7 +928,7 @@ packets). See ARCHITECTURE.md "Known limitations (WP3)".
 - **Relay path under loss: TCP head-of-line blocking** (iroh relays QUIC over TCP): `Latest` p99 0.2–0.6 s at 2–5 % netem with 8 peers. This makes direct paths and relay placement important (WP1/WP6); it is not mitigated here.
 - **Datagrams need datagram support on every hop.** A stream carrier remains selectable for paths without it.
 - **No pacing or congestion adaptation.** Bursts are shed: 16,644 of 100,000 burst objects reached the subscriber, which held at most 4.
-- **No reconnect (WP6), authorization (WP8), or hostile-peer rate limits (WP9).** Subscriptions to never-published tracks queue in moq-net without a bound.
+- **No reconnect (WP6, since done), authorization (WP8), or hostile-peer rate limits (WP9).** Subscriptions to never-published tracks queue in moq-net without a bound.
 - **Untested:** CPU and RSS are per-process figures from `/proc` (Linux only) and not heap-profiled; JavaScript decoding of the golden vectors is not tested yet.
 
 ## WP4: clock synchronisation and race start
@@ -1087,7 +1088,7 @@ The integrity zome changed, so the DNA hash changed: WP7 is a new network
   agent unreachable until the older advertisement expires (≤ 2 min).
 - **Bounded reads**: 128 joins/leaves per lobby, 100 lobbies over the last ~7 h, 4
   advertisements per member, 50 results per listing.
-- **No reconnect (WP6), no track admission (WP8), no hardening or rate limits (WP9):**
+- **No reconnect (WP6, since done), no track admission (WP8), no hardening or rate limits (WP9):**
   join attempts and result/status spam are not rate-limited.
 - **No real Internet / NAT / multi-machine validation.**
 - **`holo_hash` 0.7.0 panics** when parsing empty or non-ASCII hash text. WP7 screens
@@ -1117,3 +1118,49 @@ Gaming Hub (Tauri, future)                    one install; games added and remov
 
 See ARCHITECTURE.md "Gaming hApp / Multi-Game Architecture" for the composition decision
 (one hApp per game under one agent key), the release trust model and game isolation.
+
+## WP6: reconnect and recovery
+
+```text
+session lost (not a leave) -> PeerDisconnected -> Reconnecting
+  designated dialer: wait 250 ms, 500, 1000, 2000, 4000, 4000 ... ; other side waits
+  each attempt: dial -> authenticate the roster's EndpointId -> MoQ handshake
+  -> ReconnectSucceeded (subscriptions resume by themselves)   or, after 15 s: ReconnectGiveUp + PeerLeft
+Latest: newest state only, never the backlog     ReliableOrdered: from the next sequence, no gap, no duplicate,
+                                                 or an explicit HistoryExpired
+```
+
+```bash
+cargo test -p holochain-moq-mesh-iroh --test reconnect -- --test-threads=1 --nocapture   # matrix + numbers (netem needs userns + tc)
+cargo test -p holochain-moq-host --test reconnect -- --test-threads=1 --nocapture        # with WP5 host migration
+cargo test -p holochain-moq-e2e --test lobby two_conductors -- --nocapture               # 0 Holochain calls across a reconnect
+```
+
+Tested in-process (direct, an in-process local relay) and with netem. **Not tested on the
+real Internet, through NAT, or between physical machines.**
+
+| Test | Result |
+|---|---|
+| Forced close, direct / relay-only / netem 0, 2, 5 % | reconnected in 255 / 256 / 256, 256, 316 ms; reliable 0..90 exactly once in order; `Latest` resumed; one `PeerDisconnected`, `Reconnecting`, `ReconnectSucceeded` per side, no `PeerJoined`/`PeerLeft` |
+| Simultaneous reconnect, both sides dialing, 10 rounds | 1 session per side and 1 recovery per side every round; 100 reliable objects each way, none lost or duplicated |
+| `Latest` after a 1.5 s outage (45 states missed) | none replayed; first state = current at reconnect (+2 in flight); queue ≤ 4 |
+| Reliable replay: 300 events missed (resume mid-group) | 100..400 exactly once in order in 15 ms; 348 from history, 36 already-delivered discarded |
+| History expired (1 s retention, 3 s outage) | `HistoryExpired` at the first missing sequence; sticky; nothing skipped |
+| Identity | wrong key at the same address never admitted (gave up after 4 attempts); non-member and an endpoint claiming another agent refused (`NotMember`); the bound key reconnects |
+| WP5 interaction | host or non-host link flap < 2 s: no migration; 3 s host partition: successor at epoch 2, old host steps down on return, its claims rejected (`FailedHost`, `Stale`) |
+| Soak: 20 forced reconnects | no gap or duplicate, 20 resubscribes, tasks 2 → 2, RSS +276 KB, CPU 6.6 % vs 5.0 % without reconnects |
+| WP7 race window with a forced reconnect | 0 Holochain calls |
+
+Found and fixed: reliable history was reclaimed after **30 s** idle (moq-net's default
+cache expiry), not the documented 30 min; the publish origin now keeps it for
+`reliable_max_age`. See ARCHITECTURE.md "Reconnect and recovery (WP6)".
+
+### Known limitations (WP6)
+
+- **No real Internet / NAT / multi-machine reconnect testing.**
+- A silent peer is noticed after the 10 s QUIC idle timeout; then 15 s of retries before `PeerLeft`.
+- Resume is per 64-object group: already-delivered objects of that group are re-read and discarded.
+- Bounded history: beyond 30 min idle / 64 MiB / WP3 caps a reconnect fails with `HistoryExpired` (the game must resync).
+- A late subscriber to a track whose publisher was dropped hangs (moq-net 0.3.10); publishers must live for the race.
+- A peer restarting with a new EndpointId needs a new roster (race setup), not a reconnect.
+- No rate limit on reconnect churn from a hostile roster member (WP8/WP9).

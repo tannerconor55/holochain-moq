@@ -1159,3 +1159,35 @@ A session id (`RaceId` today) only has to be unique among the sessions a player'
 endpoint joins; sessions of different games never share an endpoint or a roster.
 Adapters should still prefix session ids with a game tag (`tk-…`) to keep logs and
 diagnostics unambiguous. This is a convention, not enforced.
+
+## WP6: reconnect and recovery (`crates/mesh`, `crates/mesh-iroh`)
+
+No new wire messages: recovery reuses MoQ sessions, tracks and the WP3 delivery
+contracts. What a peer can rely on:
+
+### How a session ends
+
+| Remote close | Meaning | Mesh reaction |
+|---|---|---|
+| QUIC application close code **0** (`LEAVE_CODE`; also `iroh::Endpoint::close`) | deliberate leave | `PeerLeft`, no reconnect |
+| code **0x4d10** (`ABORT_CODE`: superseded or severed) | loss | reconnect |
+| any other code, reset, idle timeout (10 s), path failure | loss | reconnect |
+| `RejectReason` codes 0x4d01–0x4d04 | link refused before any session | (unchanged from WP2) |
+
+### Reconnect
+
+- Only the lower `AgentPubKey` re-dials (or both with `DialPolicy::BothDial`; the
+  tie-break keeps the lower side's link). Delays 250 ms × 2ⁿ, capped at 4 s, give up 15 s
+  after the loss. Every attempt re-runs the WP2 identity checks against the roster.
+- An authenticated link from the rightful dialer replaces a half-open session.
+
+### Resume semantics
+
+- `Latest`: a new subscription delivers only state published after it attached; the
+  subscriber discards any sequence ≤ the last delivered.
+- `ReliableOrdered`: resume point = next undelivered object sequence `n`; the reader
+  starts at group `n / 64`, fetching it from the publisher's history if needed, skips
+  objects `< n`, and delivers `n, n+1, …` in order. A missing group or object is an
+  error (`HistoryExpired` / `SequenceGap`), never a skip.
+- Publisher history: retained while read or written within `reliable_max_age`
+  (default 30 min idle) and within a 64 MiB cache target, plus the WP3 per-track caps.
