@@ -502,8 +502,9 @@ impl<T: MeshTransport> MeshSession<T> {
     /// Close every session (as a deliberate leave) and the transport, and
     /// wait for the transport.
     pub async fn close(self) {
-        self.inner.shutdown();
+        self.inner.closing.store(true, Ordering::SeqCst);
         self.inner.transport.close().await;
+        self.inner.shutdown(true);
     }
 }
 
@@ -512,12 +513,18 @@ impl<T: MeshTransport> Drop for MeshSession<T> {
         if self.inner.closing.load(Ordering::SeqCst) {
             return;
         }
-        self.inner.shutdown();
         // Close the transport gracefully if a runtime is available, so peers
-        // see the close instead of waiting for the idle timeout.
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let inner = self.inner.clone();
-            rt.spawn(async move { inner.transport.close().await });
+        // see the leave instead of waiting for the idle timeout.
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                self.inner.closing.store(true, Ordering::SeqCst);
+                let inner = self.inner.clone();
+                rt.spawn(async move {
+                    inner.transport.close().await;
+                    inner.shutdown(true);
+                });
+            }
+            Err(_) => self.inner.shutdown(true),
         }
     }
 }
@@ -552,16 +559,30 @@ impl<T: MeshTransport> Inner<T> {
             .expect("every roster agent has a slot"))
     }
 
-    fn shutdown(&self) {
+    /// Stop the mesh. `close_sessions`: close every session here (as a leave).
+    /// Otherwise the caller closes the transport next, which closes them all as
+    /// a leave and waits until the remotes acknowledged it; the sessions are
+    /// released after that (`release_sessions`).
+    fn shutdown(&self, close_sessions: bool) {
         self.closing.store(true, Ordering::SeqCst);
+        if close_sessions {
+            self.release_sessions();
+        }
+        self.abort_tasks();
+    }
+
+    fn abort_tasks(&self) {
         for t in self.tasks.lock().unwrap().drain(..) {
             t.abort();
         }
-        for (_, p) in self.peers.lock().unwrap().drain() {
-            p.session.close();
-        }
         for s in self.slots.lock().unwrap().values() {
             s.conn.send_replace(Conn::Gone);
+        }
+    }
+
+    fn release_sessions(&self) {
+        for (_, p) in self.peers.lock().unwrap().drain() {
+            p.session.close();
         }
     }
 

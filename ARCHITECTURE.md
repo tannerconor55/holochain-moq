@@ -1451,7 +1451,15 @@ Connecting ─▶ Connected ──(session lost)──▶ Disconnected ─▶ Wa
 ```
 
 - **Loss vs leave.** A session ended by the remote with application close code 0 (the
-  mesh's own close, and what iroh's `Endpoint::close` sends) is a deliberate **leave**:
+  mesh's own close, and what iroh's `Endpoint::close` sends) is a deliberate **leave**.
+  The leaving mesh closes its endpoint first (`Endpoint::close` closes every connection
+  with code 0 and retransmits until acknowledged) and only then tears the rest down.
+  On the receiving side the peer's close frame can land just after its own MoQ stack,
+  reacting to the same teardown, closed the connection locally; QUIC then records
+  `LocallyClosed` but still counts the received close frame, so a local close the mesh
+  did not make, after a received close frame, is also a leave (measured: before this
+  rule ~40 % of leaves in a 4-peer mesh were misread as losses; after it 72/72 leaves and
+  10/10 WP2 removal runs correct). A leave is:
   `PeerLeft` at once, no reconnect (the WP2 removal behaviour). Anything else (a forced
   close, reset, idle timeout after 10 s of silence, path loss) is a **loss**:
   `PeerDisconnected` → `Reconnecting` → `ReconnectSucceeded` or `ReconnectGiveUp` +
@@ -1558,6 +1566,11 @@ old one (`Stale`) are rejected. Exactly one host and one AI publisher remain.
   `HistoryExpired`; the game must then resynchronise (not done here).
 - **A late subscriber to a track whose publisher was dropped hangs** (moq-net 0.3.10
   behaviour). Publishers must live for the race.
+- **Leave detection rests on the close frame.** A leave whose close frame never arrives
+  (lost on a real network, process killed) is a loss: reconnect, then `PeerLeft` after
+  the give-up window. Conversely a peer's *abort* (code 0x4d10) caught in the same race
+  as above would read as a leave; the mesh only aborts superseded half-open sessions and
+  the `sever` test hook, so this was not observed in the tests.
 - **An EndpointId change is not a reconnect**: the roster is fixed at race setup; a peer
   that restarts with a new key needs a new roster (WP7 presence + race setup).
 - **A deposed host is never re-elected** in the same race even after reconnecting (WP5 rule).

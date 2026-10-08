@@ -1159,6 +1159,7 @@ cache expiry), not the documented 30 min; the publish origin now keeps it for
 
 - **No real Internet / NAT / multi-machine reconnect testing.**
 - A silent peer is noticed after the 10 s QUIC idle timeout; then 15 s of retries before `PeerLeft`.
+- Leave vs loss is decided by the peer's QUIC close frame: a leave whose close frame is lost reads as a loss (`PeerLeft` after the give-up window).
 - Resume is per 64-object group: already-delivered objects of that group are re-read and discarded.
 - Bounded history: beyond 30 min idle / 64 MiB / WP3 caps a reconnect fails with `HistoryExpired` (the game must resync).
 - A late subscriber to a track whose publisher was dropped hangs (moq-net 0.3.10); publishers must live for the race.

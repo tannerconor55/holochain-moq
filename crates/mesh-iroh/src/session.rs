@@ -21,6 +21,8 @@ pub struct IrohMoqSession {
     conn: Connection,
     session: moq_net::Session,
     reliable_max_age: std::time::Duration,
+    /// The mesh closed or aborted this session itself.
+    closed_here: std::sync::atomic::AtomicBool,
     /// The remote's broadcasts arrive here; a subscription reads only the one
     /// broadcast its path names.
     subscribe: origin::Producer,
@@ -71,6 +73,7 @@ impl IrohMoqSession {
             conn,
             session,
             reliable_max_age,
+            closed_here: std::sync::atomic::AtomicBool::new(false),
             subscribe,
         })
     }
@@ -163,29 +166,50 @@ impl TransportSession for IrohMoqSession {
     }
 
     async fn closed(&self) {
-        tokio::select! {
-            _ = self.conn.closed() => {}
-            _ = self.session.closed() => {}
-        }
+        let first = tokio::select! {
+            e = self.conn.closed() => Some(e),
+            _ = self.session.closed() => None,
+        };
+        let err = match first {
+            Some(e) => Some(e),
+            None => tokio::time::timeout(std::time::Duration::from_millis(250), self.conn.closed())
+                .await
+                .ok(),
+        };
+        let _ = err;
     }
 
     fn close(&self) {
+        self.closed_here
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.conn
             .close(VarInt::from_u32(LEAVE_CODE), b"mesh session closed");
     }
 
     fn abort(&self) {
+        self.closed_here
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.conn
             .close(VarInt::from_u32(ABORT_CODE), b"mesh session aborted");
     }
 
+    /// A leave is the peer's code-0 close. The peer's close frame can arrive
+    /// just after this side's MoQ stack, reacting to the same teardown, has
+    /// already closed the connection locally; QUIC then records
+    /// `LocallyClosed`, but the received close frame is still counted. A
+    /// local close the mesh did not make, after the peer sent a close frame,
+    /// is therefore a leave too. Timeouts, resets and path failures carry no
+    /// close frame from the peer and stay losses.
     fn end_reason(&self) -> SessionEnd {
+        let peer_closed = self.conn.stats().frame_rx.connection_close > 0;
+        let ours = self.closed_here.load(std::sync::atomic::Ordering::SeqCst);
         match self.conn.close_reason() {
             Some(ConnectionError::ApplicationClosed(c))
                 if c.error_code == VarInt::from_u32(LEAVE_CODE) =>
             {
                 SessionEnd::Left
             }
+            Some(ConnectionError::LocallyClosed) if peer_closed && !ours => SessionEnd::Left,
             Some(e) => SessionEnd::Lost(e.to_string()),
             None => SessionEnd::Lost("MoQ session ended".into()),
         }
