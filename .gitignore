@@ -37,3 +37,6 @@ dna/workdir/turbo_kart/forge/*.dna
 
 # Tauri-generated ACL schemas (rebuilt by tauri-build)
 apps/turbo-kart-desktop/src-tauri/gen/
+
+# Turbo Kart desktop app moved to github.com/tannerconor55/turbo-kart
+apps/turbo-kart-desktop/

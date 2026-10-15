@@ -1,9 +1,0 @@
-{
-  "comment": "E6.5a: the game's pinned Three.js (index.html import map: cdn.jsdelivr.net/npm/three@0.170.0), packaged into the desktop webhapp so the desktop needs no CDN at runtime. Bytes come from the npm registry tarball and are accepted only if they match this integrity (npm dist.integrity). The browser game is unchanged and still uses the CDN.",
-  "package": "three",
-  "version": "0.170.0",
-  "tarball": "https://registry.npmjs.org/three/-/three-0.170.0.tgz",
-  "integrity": "sha512-FQK+LEpYc0fBD+J8g6oSEyyNzjp+Q7Ks1C568WWaoMRLW+TkNNWmenWeGgJjV105Gd+p/2ql1ZcjYvNiPZBhuQ==",
-  "cdnPrefix": "https://cdn.jsdelivr.net/npm/three@0.170.0/",
-  "localPrefix": "./vendor/three@0.170.0/"
-}
