@@ -1,0 +1,22 @@
+{
+  "turbo_kart": {
+    "status": "enabled",
+    "agent": "uhCAkgPR9nwP-JhZaFQd_3DPZCwfrGGPy7TcxN8Cvom1J3m-9IORx",
+    "cells": {
+      "turbo_kart": {
+        "dna": "uhC0k50xschph7WNzqvdIjIHg8lsoHwl2o0moMqbuBojhOf52KB-G",
+        "agent": "uhCAkgPR9nwP-JhZaFQd_3DPZCwfrGGPy7TcxN8Cvom1J3m-9IORx"
+      }
+    }
+  },
+  "gaming_platform": {
+    "status": "enabled",
+    "agent": "uhCAkgPR9nwP-JhZaFQd_3DPZCwfrGGPy7TcxN8Cvom1J3m-9IORx",
+    "cells": {
+      "gaming_directory": {
+        "dna": "uhC0krooLUR59MWx49qVax9ZciBgppVxWMnMPYk9aS1MUyuv1p1Bp",
+        "agent": "uhCAkgPR9nwP-JhZaFQd_3DPZCwfrGGPy7TcxN8Cvom1J3m-9IORx"
+      }
+    }
+  }
+}

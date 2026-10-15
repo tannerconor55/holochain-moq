@@ -34,3 +34,6 @@ dna/workdir/gaming_directory/forge/*.dna
 dna/workdir/turbo_kart/*.dna
 dna/workdir/turbo_kart/*.happ
 dna/workdir/turbo_kart/forge/*.dna
+
+# Tauri-generated ACL schemas (rebuilt by tauri-build)
+apps/turbo-kart-desktop/src-tauri/gen/

@@ -109,6 +109,7 @@ impl IrohConfig {
 
 pub struct IrohMeshTransport {
     endpoint: Endpoint,
+    close_endpoint: bool,
     latest_carrier: LatestCarrier,
     reliable_max_age: Duration,
     publish: origin::Producer,
@@ -168,6 +169,21 @@ impl IrohMeshTransport {
         };
         let endpoint = builder.bind().await.context("bind iroh endpoint")?;
 
+        Self::from_endpoint(endpoint, config.latest_carrier, config.reliable_max_age, true)
+    }
+
+    /// A race-local publish origin on an already configured, privately owned
+    /// endpoint. The caller must serialize meshes on this endpoint and retain
+    /// it until all meshes are closed. Closing this transport retires its
+    /// publications; the endpoint owner closes the socket at process shutdown.
+    /// Existing `bind` transports still own/close their endpoint as before.
+    pub fn from_shared_endpoint(endpoint: Endpoint, local_agent: &str) -> anyhow::Result<Self> {
+        holochain_moq_mesh::Source::check_agent(local_agent)?;
+        Self::from_endpoint(endpoint, LatestCarrier::default(), holochain_moq_mesh::RELIABLE_MAX_AGE, false)
+    }
+
+    fn from_endpoint(endpoint: Endpoint, latest_carrier: LatestCarrier,
+        reliable_max_age: Duration, close_endpoint: bool) -> anyhow::Result<Self> {
         // moq-net's default origin reclaims any group nobody read or wrote for
         // 30 s, whatever the track's retention says (its `max_age` is a
         // media-timestamp bound on delivery, not on caching). Reliable history
@@ -176,15 +192,16 @@ impl IrohMeshTransport {
         let mut origin_config = origin::Config::default();
         origin_config.pool = moq_net::cache::Pool::new(
             moq_net::cache::Config::default()
-                .with_expiry(config.reliable_max_age)
+                .with_expiry(reliable_max_age)
                 .with_capacity(PUBLISH_CACHE_BYTES),
         );
         let (publish, driver) = origin::Producer::new(origin_config);
         spawn_driver(driver);
         Ok(Self {
             endpoint,
-            latest_carrier: config.latest_carrier,
-            reliable_max_age: config.reliable_max_age,
+            close_endpoint,
+            latest_carrier,
+            reliable_max_age,
             publish,
             broadcasts: Mutex::new(HashMap::new()),
             tracks: Mutex::new(HashSet::new()),
@@ -218,6 +235,48 @@ impl IrohMeshTransport {
     }
 }
 
+/// E6.INTERNET.2: why a connection failure is one a retry cannot fix, if it
+/// is: the remote refused us with a mesh reject code for identity or
+/// membership, or TLS authentication failed. Timeouts, resets, lost paths,
+/// missing addresses and an unanswered dial are transient (`None`).
+fn terminal_connection_failure(e: &iroh::endpoint::ConnectionError) -> Option<String> {
+    use iroh::endpoint::ConnectionError as C;
+    match e {
+        C::ApplicationClosed(c) => {
+            let code = c.error_code.into_inner();
+            [RejectReason::NotMember, RejectReason::IdentityMismatch]
+                .into_iter()
+                .find(|r| u64::from(r.code()) == code)
+                .map(|r| format!("refused by the peer ({r:?}, code {code:#x})"))
+        }
+        // QUIC crypto (TLS) error codes are 0x100..=0x1ff.
+        C::TransportError(t) if (0x100..=0x1ff).contains(&u64::from(t.code)) => {
+            Some(format!("TLS authentication failed: {t}"))
+        }
+        C::ConnectionClosed(c) if (0x100..=0x1ff).contains(&u64::from(c.error_code)) => {
+            Some(format!("TLS authentication failed (closed by the peer): {c}"))
+        }
+        _ => None,
+    }
+}
+
+fn terminal_connect_failure(e: &iroh::endpoint::ConnectError) -> Option<String> {
+    use iroh::endpoint::{ConnectError, ConnectWithOptsError, ConnectingError};
+    match e {
+        ConnectError::Connection { source, .. } => terminal_connection_failure(source),
+        ConnectError::Connecting { source, .. } => match source {
+            ConnectingError::ConnectionError { source, .. } => terminal_connection_failure(source),
+            ConnectingError::HandshakeFailure { .. } => Some(format!("TLS authentication failed: {source}")),
+            _ => None,
+        },
+        ConnectError::Connect { source, .. } => match source {
+            ConnectWithOptsError::SelfConnect { .. } | ConnectWithOptsError::InvalidAlpn { .. } => Some(source.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl MeshTransport for IrohMeshTransport {
     type NodeId = EndpointId;
@@ -244,7 +303,15 @@ impl MeshTransport for IrohMeshTransport {
             .endpoint
             .connect(addr.clone(), moq_version().alpn().as_bytes())
             .await
-            .with_context(|| format!("iroh connect to {}", addr.id.fmt_short()))?;
+            .map_err(|e| {
+                // E6.INTERNET.2: authentication failures and refusals are terminal.
+                let terminal = terminal_connect_failure(&e);
+                let e = anyhow::Error::new(e).context(format!("iroh connect to {}", addr.id.fmt_short()));
+                match terminal {
+                    Some(why) => e.context(holochain_moq_mesh::TerminalDialError(why)),
+                    None => e,
+                }
+            })?;
         Ok(conn)
     }
 
@@ -260,6 +327,7 @@ impl MeshTransport for IrohMeshTransport {
         remote_agent: &str,
     ) -> anyhow::Result<IrohMoqSession> {
         holochain_moq_mesh::Source::check_agent(remote_agent)?;
+        let probe = link.clone();
         let tier = moq_net::stats::Tier::new(remote_agent.to_string());
         let session_stats = self
             .stats
@@ -274,7 +342,15 @@ impl MeshTransport for IrohMeshTransport {
             self.reliable_max_age,
             session_stats,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            // E6.INTERNET.2: a remote that refused this endpoint (identity or
+            // membership) closed the link with a reject code: terminal.
+            match probe.close_reason().as_ref().and_then(terminal_connection_failure) {
+                Some(why) => e.context(holochain_moq_mesh::TerminalDialError(why)),
+                None => e,
+            }
+        })?;
         Ok(session)
     }
 
@@ -340,7 +416,7 @@ impl MeshTransport for IrohMeshTransport {
         for (_, (bc, _)) in self.broadcasts.lock().unwrap().drain() {
             bc.close();
         }
-        self.endpoint.close().await;
+        if self.close_endpoint { self.endpoint.close().await; }
     }
 }
 

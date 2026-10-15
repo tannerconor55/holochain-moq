@@ -22,6 +22,52 @@ use serde::{Deserialize, Serialize};
 const ALICE: usize = 0;
 const BOB: usize = 1;
 
+/// E4: retiring a sidecar capability must not invalidate an honest agent,
+/// while the game's append-only records must still be protected.
+#[tokio::test(flavor = "multi_thread")]
+async fn capability_revocation_is_valid_but_game_entry_deletion_is_rejected() {
+    use holochain_types::prelude::{CapAccess, CapSecret, GrantZomeCallCapabilityPayload,
+        GrantedFunctions, ZomeCallCapGrant};
+    use std::collections::{BTreeSet, HashSet};
+
+    let net = platform_and_kart(2, &dna_bundle(), &kart_forge_dna_bundle()).await;
+    let admin = holochain_client::AdminWebsocket::connect(
+        (std::net::Ipv4Addr::LOCALHOST, net.admin_port(BOB)), None,
+    ).await.unwrap();
+    let cell = net.kart_cells[BOB].cell_id().clone();
+    let grant = admin.grant_zome_call_capability(GrantZomeCallCapabilityPayload {
+        cell_id: cell.clone(),
+        cap_grant: ZomeCallCapGrant {
+            tag: "E4-sidecar-revocation".into(),
+            functions: GrantedFunctions::Listed(HashSet::from([
+                (KART_ZOME.into(), "get_lobby".into()),
+            ])),
+            access: CapAccess::Assigned {
+                secret: CapSecret::from([7; 64]),
+                assignees: BTreeSet::from([net.agent(ALICE)]),
+            },
+        },
+    }).await.unwrap();
+    admin.revoke_zome_call_capability(cell, grant).await.unwrap();
+    net.settle().await;
+    for conductor in net.conductors.iter() {
+        assert!(conductor.get_invalid_integrated_ops(net.kart_cells[BOB].dna_hash())
+            .await.unwrap().is_empty(), "capability revocation must not create invalid DHT ops");
+    }
+
+    let lobby: ActionHash = net.conductors[BOB].call(
+        &net.kart_zome(BOB), "create_lobby", create_input("After revocation", None),
+    ).await;
+    net.settle().await;
+    assert!(get_lobby(&net, ALICE, &lobby.to_string()).await.is_some(),
+        "Bob remains network-visible after revocation");
+    let delete = net.conductors[BOB].call_fallible::<_, ActionHash>(
+        &net.kart_cells[BOB].zome("forge"), "forge_delete_entry", lobby.clone(),
+    ).await.map_err(|e| e.to_string());
+    rejected(delete, "deleting a game lobby must remain forbidden");
+    assert!(get_lobby(&net, BOB, &lobby.to_string()).await.is_some());
+}
+
 /// Mirrors of the forge zome's inputs (same serde shape).
 #[derive(Debug, Serialize, Deserialize)]
 enum ForgeEntry {

@@ -17,7 +17,7 @@ use holochain_moq_turbo_kart::{
 };
 use turbo_kart_integrity::{
     EntryTypes, LinkTypes, LobbyEntry, LobbyJoinEntry, LobbyLeaveEntry, LobbyStatusEntry,
-    RaceResultEntry,
+    RaceResultEntry, RaceSetupEntry,
 };
 
 fn now_millis() -> ExternResult<i64> {
@@ -369,4 +369,54 @@ pub fn get_leaderboard(input: LeaderboardInput) -> ExternResult<Vec<LeaderboardE
         }
     }
     Ok(out)
+}
+
+
+/// Read one immutable host-authored setup. More than one is a conflict, never
+/// a timestamp election. Native clients verify its cross-DNA binding references.
+#[hdk_extern]
+pub fn get_race(lobby_id: LobbyId) -> ExternResult<Option<kart::race::RaceRecord>> {
+    let hash = lobby_hash(&lobby_id)?;
+    let Some((_, lobby)) = get_lobby_entry(&hash)? else { return Err(guest("no such lobby")); };
+    let links = links_newest_first(hash, LinkTypes::LobbyToRace)?;
+    if links.len() > 16 { return Err(guest("race_conflict: too many race links")); }
+    let mut found = None;
+    for link in links {
+        let Some(h) = link_target_action(&link) else { continue; };
+        if let Some((author, at, e)) = fetch_timed::<RaceSetupEntry>(h.clone())? {
+            if author.to_string() != lobby.host || e.setup.lobby != lobby_id { continue; }
+            if found.as_ref().is_some_and(|r: &kart::race::RaceRecord| r.action != h.to_string()) {
+                return Err(guest("race_conflict: multiple immutable setups"));
+            }
+            found = Some(kart::race::RaceRecord { action: h.to_string(), started_at_ms: at, setup: e.setup });
+        }
+    }
+    Ok(found)
+}
+
+/// The host's single zome invocation commits setup, index and Starting status.
+/// Repeated requests return the existing race; they never replace its roster.
+#[hdk_extern]
+pub fn start_race(input: kart::race::StartRaceInput) -> ExternResult<kart::race::RaceRecord> {
+    let snapshot = get_lobby(input.lobby.clone())?.ok_or_else(|| guest("no such lobby"))?;
+    if snapshot.lobby.host != agent_info()?.agent_initial_pubkey.to_string() { return Err(guest("not_host: only the lobby host starts")); }
+    if let Some(race) = get_race(input.lobby.clone())? { return Ok(race); }
+    if snapshot.state() != Some(LobbyState::Open) { return Err(guest("race_not_ready: lobby is not open")); }
+    if snapshot.members != input.participants.iter().map(|p| p.member.clone()).collect::<Vec<_>>() {
+        return Err(guest("race_not_ready: roster changed; refresh before starting"));
+    }
+    let setup = kart::race::RaceSetup {
+        race_id: kart::race::race_id(&input.lobby), host_epoch: 1,
+        lobby: input.lobby.clone(), config: snapshot.lobby, participants: input.participants,
+    };
+    setup.validate().map_err(guest)?;
+    let now = now_millis()?;
+    if setup.participants.iter().any(|p| now < p.binding_published_at_ms || now > p.binding_expires_at_ms) {
+        return Err(guest("race_not_ready: endpoint binding expired before start"));
+    }
+    let hash = create_entry(EntryTypes::RaceSetupEntry(RaceSetupEntry { setup: setup.clone() }))?;
+    create_link(lobby_hash(&input.lobby)?, hash.clone(), LinkTypes::LobbyToRace, ())?;
+    add_status(LobbyStatus { lobby: input.lobby, state: LobbyState::Starting, race_id: Some(setup.race_id.clone()) })?;
+    let record = get(hash.clone(), GetOptions::local())?.ok_or_else(|| guest("race record unavailable"))?;
+    Ok(kart::race::RaceRecord { action: hash.to_string(), started_at_ms: record.action().timestamp().as_millis(), setup })
 }

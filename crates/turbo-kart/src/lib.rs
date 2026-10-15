@@ -49,6 +49,8 @@ use holochain_moq_protocol::{
     live_endpoints, AgentPubKeyB64, Endpoint, EndpointAdvertisement, EndpointKind, MAX_IROH_RELAYS,
 };
 use serde::{Deserialize, Serialize};
+
+pub mod race;
 use sha2::{Digest, Sha256};
 use std::fmt;
 

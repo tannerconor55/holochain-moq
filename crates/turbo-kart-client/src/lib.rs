@@ -46,6 +46,10 @@ pub enum KartError {
         caller: AgentPubKeyB64,
         claimed: AgentPubKeyB64,
     },
+    #[error("race_not_ready: {0}")]
+    RaceNotReady(String),
+    #[error("not_host: only the lobby host may start a race")]
+    NotHost,
     #[error(transparent)]
     Holochain(#[from] DirectoryError),
 }

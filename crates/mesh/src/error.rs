@@ -44,3 +44,18 @@ pub enum MeshError {
     #[error("transport: {0:#}")]
     Transport(#[from] anyhow::Error),
 }
+
+/// E6.INTERNET.2: a dial or session-handshake failure that retrying cannot
+/// fix: the remote failed authentication, or refused this endpoint by identity
+/// or membership. A transport wraps such failures in this type; initial dialing
+/// stops at the first one instead of retrying it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct TerminalDialError(pub String);
+
+/// Is `e` (or anything it wraps) a [`TerminalDialError`]?
+pub fn is_terminal_dial_error(e: &anyhow::Error) -> bool {
+    // A context value is only reachable through anyhow's downcast (the
+    // wrapper type in `chain()` is private); a source error through `chain()`.
+    e.downcast_ref::<TerminalDialError>().is_some() || e.chain().any(|c| c.is::<TerminalDialError>())
+}

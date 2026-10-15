@@ -1,0 +1,24 @@
+---
+tracing_override: ~
+data_root_path: "###DEFINED_AT_RUNTIME###"
+keystore:
+  type: lair_server
+  connection_url: "###DEFINED_AT_RUNTIME###"
+admin_interfaces:
+  - driver:
+      type: websocket
+      port: "###DEFINED_AT_RUNTIME###"
+      danger_bind_addr: ~
+      allowed_origins: "###DEFINED_AT_RUNTIME###"
+network:
+  request_timeout_s: 60
+  bootstrap_url: "###DEFINED_IN_KANGAROO_CONFIG###"
+  base64_auth_material_bootstrap: ~
+  relay_url: "###DEFINED_IN_KANGAROO_CONFIG###"
+  base64_auth_material_relay: ~
+  target_arc_factor: 1
+  report: none
+  advanced: ~
+db_sync_level: Normal
+tuning_params: ~
+tracing_scope: ~

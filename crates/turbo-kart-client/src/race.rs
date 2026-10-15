@@ -43,6 +43,7 @@ pub const MAX_GRID: usize = 8;
 pub struct RaceMember {
     pub agent: AgentPubKeyB64,
     pub endpoint_id: [u8; 32],
+    pub character_id: String,
     /// Live advertisements of `endpoint_id`, newest first (dial hints only).
     pub endpoints: Vec<Endpoint>,
 }
@@ -55,6 +56,8 @@ pub struct RaceAdmission {
     /// The lobby host: the race's initial (epoch 1) host authority.
     pub host: AgentPubKeyB64,
     pub local: AgentPubKeyB64,
+    pub config: holochain_moq_turbo_kart::Lobby,
+    pub host_epoch: u64,
     /// Every admitted player, the local one included, ordered by agent.
     pub members: Vec<RaceMember>,
     /// When the snapshot was taken (ms since epoch; presence judged at it).
@@ -146,6 +149,7 @@ impl RaceAdmission {
             members.push(RaceMember {
                 agent,
                 endpoint_id,
+                character_id: m.member.character_id.clone(),
                 endpoints: live,
             });
         }
@@ -155,6 +159,8 @@ impl RaceAdmission {
             race_id,
             host: view.host().clone(),
             local: local.to_string(),
+            config: view.lobby.clone(),
+            host_epoch: 1,
             members,
             taken_at_ms: now_ms,
         })
@@ -199,6 +205,111 @@ impl RaceAdmission {
             return Err(AdmissionError::TooManyAi(count));
         }
         Ok((0..count as u8).collect())
+    }
+}
+
+
+/// E6.1 uses the same admission model with a persisted membership snapshot.
+/// Endpoint freshness is judged at the signed start action, not at reconnect.
+impl RaceAdmission {
+    pub fn from_locked(record: &holochain_moq_turbo_kart::race::RaceRecord, local: &str,
+        bindings: Vec<holochain_moq_protocol::SignedPresence>) -> Result<Self, AdmissionError> {
+        use holochain_moq_turbo_kart::{LobbySnapshot, LobbyStatus, StatusRecord};
+        let s = &record.setup;
+        if s.validate().is_err() || bindings.len() != s.participants.len() { return Err(AdmissionError::RaceId); }
+        let mut by_agent = BTreeMap::new();
+        for (p, b) in s.participants.iter().zip(bindings) {
+            if !holochain_moq_turbo_kart::race::binding_verifies(&b) { return Err(AdmissionError::NoLivePresence(p.member.player.clone())); }
+            let ad = b.advertisement;
+            if ad.peer_endpoint.agent != p.member.player || ad.endpoint().kind != EndpointKind::Iroh
+                || ad.endpoint().transport_identity.fingerprint != p.endpoint_id
+                || ad.published_at != p.binding_published_at_ms || ad.expires_at != Some(p.binding_expires_at_ms)
+                || record.started_at_ms < ad.published_at {
+                return Err(AdmissionError::NoLivePresence(p.member.player.clone()));
+            }
+            by_agent.insert(p.member.player.clone(), vec![ad]);
+        }
+        let snap = LobbySnapshot { id: s.lobby.clone(), lobby: s.config.clone(), created_at: record.started_at_ms,
+            status: Some(StatusRecord { status: LobbyStatus { lobby: s.lobby.clone(), state: LobbyState::Starting, race_id: Some(s.race_id.clone()) },
+                author: s.config.host.clone(), at_ms: record.started_at_ms }),
+            members: s.participants.iter().map(|p| p.member.clone()).collect(), waitlist: vec![] };
+        let view = LobbyView::compose(snap, |m| by_agent.remove(&m.player).unwrap_or_default());
+        Self::from_view(&view, local, record.started_at_ms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RaceReadiness {
+    pub can_start: bool,
+    pub reason: Option<String>,
+    pub race: Option<holochain_moq_turbo_kart::race::RaceRecord>,
+}
+
+impl crate::TurboKartClient {
+    pub async fn get_race(&self, lobby: &str) -> Result<Option<holochain_moq_turbo_kart::race::RaceRecord>, crate::KartError> {
+        holochain_moq_hdk_bridge::parse_action_hash(lobby, "get_race")?;
+        let record: Option<holochain_moq_turbo_kart::race::RaceRecord> = self.call("get_race", &lobby).await?;
+        if let Some(r) = &record {
+            if r.setup.lobby != lobby || r.setup.validate().is_err() { return Err(crate::KartError::RaceNotReady("invalid locked setup".into())); }
+            let mut bindings = Vec::new();
+            for p in &r.setup.participants {
+                bindings.push(self.directory.endpoint_binding(&p.binding).await?.ok_or_else(|| crate::KartError::RaceNotReady(format!("binding unavailable for {}", p.member.player)))?);
+            }
+            // Even an excluded viewer may inspect the public setup, but gets no admission.
+            RaceAdmission::from_locked(r, &r.setup.config.host, bindings)
+                .map_err(|e| crate::KartError::RaceNotReady(e.to_string()))?;
+        }
+        Ok(record)
+    }
+
+    async fn start_input(&self, lobby: &str) -> Result<holochain_moq_turbo_kart::race::StartRaceInput, crate::KartError> {
+        use holochain_moq_turbo_kart::race::{RaceParticipant, StartRaceInput};
+        let snap = self.get_lobby_snapshot(&lobby.to_string()).await?
+            .ok_or_else(|| crate::KartError::RaceNotReady("lobby not found".into()))?;
+        if snap.lobby.host != self.local() { return Err(crate::KartError::NotHost); }
+        if snap.state() != Some(LobbyState::Open) || snap.members.is_empty() || !snap.is_member(&snap.lobby.host) {
+            return Err(crate::KartError::RaceNotReady("open lobby with active host required".into()));
+        }
+        let now = holochain_moq_hdk_bridge::unix_now_ms();
+        let mut participants = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for member in snap.members {
+            let bindings = self.directory.recent_endpoint_bindings(&member.player).await?;
+            let mut live = bindings.into_iter().filter(|(_, b)| b.advertisement.endpoint().kind == EndpointKind::Iroh
+                && !live_endpoints(std::slice::from_ref(&b.advertisement), now).is_empty());
+            let (binding, b) = live.next().ok_or_else(|| crate::KartError::RaceNotReady(format!("{} has no live authenticated endpoint binding", member.player)))?;
+            if !holochain_moq_turbo_kart::race::binding_verifies(&b) { return Err(crate::KartError::RaceNotReady("invalid authenticated endpoint binding".into())); }
+            let endpoint_id = b.advertisement.endpoint().transport_identity.fingerprint;
+            if live.any(|(_, b)| b.advertisement.endpoint().transport_identity.fingerprint != endpoint_id) || !ids.insert(endpoint_id) {
+                return Err(crate::KartError::RaceNotReady("ambiguous or shared endpoint binding".into()));
+            }
+            let binding_published_at_ms = b.advertisement.published_at;
+            let binding_expires_at_ms = b.advertisement.expires_at.ok_or_else(|| crate::KartError::RaceNotReady("endpoint binding has no expiry".into()))?;
+            if binding_published_at_ms > now || binding_expires_at_ms.saturating_sub(now) < 30_000 {
+                return Err(crate::KartError::RaceNotReady("endpoint binding is future-dated or expires too soon; wait for its presence refresh".into()));
+            }
+            participants.push(RaceParticipant { member, binding, endpoint_id, binding_published_at_ms, binding_expires_at_ms });
+        }
+        Ok(StartRaceInput { lobby: lobby.into(), participants })
+    }
+
+    pub async fn race_readiness(&self, lobby: &str) -> Result<RaceReadiness, crate::KartError> {
+        if let Some(race) = self.get_race(lobby).await? { return Ok(RaceReadiness { can_start: false, reason: None, race: Some(race) }); }
+        match self.start_input(lobby).await {
+            Ok(_) => Ok(RaceReadiness { can_start: true, reason: None, race: None }),
+            Err(crate::KartError::NotHost) => Ok(RaceReadiness { can_start: false, reason: Some("Waiting for the host to start".into()), race: None }),
+            Err(crate::KartError::RaceNotReady(reason)) => Ok(RaceReadiness { can_start: false, reason: Some(reason), race: None }),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn start_race(&self, lobby: &str) -> Result<holochain_moq_turbo_kart::race::RaceRecord, crate::KartError> {
+        let snap = self.get_lobby_snapshot(&lobby.to_string()).await?.ok_or_else(|| crate::KartError::RaceNotReady("lobby not found".into()))?;
+        if snap.lobby.host != self.local() { return Err(crate::KartError::NotHost); }
+        if let Some(race) = self.get_race(lobby).await? { return Ok(race); }
+        let input = self.start_input(lobby).await?;
+        let _: holochain_moq_turbo_kart::race::RaceRecord = self.call("start_race", &input).await?;
+        self.get_race(lobby).await?.ok_or_else(|| crate::KartError::RaceNotReady("start result not yet readable; refresh, do not retry blindly".into()))
     }
 }
 
@@ -400,5 +511,39 @@ mod tests {
             RaceAdmission::from_view(&racing(nine), "p0", 1).unwrap_err(),
             AdmissionError::TooManyMembers(9)
         );
+    }
+}
+
+impl crate::TurboKartClient {
+    /// E6.2 setup boundary only. Identity/roster stay frozen; refresh dial hints
+    /// only from a current signed binding with exactly the authorized key.
+    pub async fn session_admission(&self, lobby: &str) -> Result<RaceAdmission, crate::KartError> {
+        let fail = |s: String| crate::KartError::RaceNotReady(s);
+        let record = self.get_race(lobby).await?.ok_or_else(|| fail("race has not started".into()))?;
+        let current = self.get_lobby_snapshot(&lobby.to_string()).await?.ok_or_else(|| fail("lobby unavailable".into()))?;
+        if !matches!(current.state(), Some(LobbyState::Starting | LobbyState::Racing))
+            || current.status.as_ref().and_then(|s| s.status.race_id.as_deref()) != Some(record.setup.race_id.as_str()) {
+            return Err(fail("race is finished, abandoned or no longer current".into()));
+        }
+        let mut bindings = Vec::new();
+        for p in &record.setup.participants {
+            bindings.push(self.directory.endpoint_binding(&p.binding).await?.ok_or_else(|| fail("locked binding unavailable".into()))?);
+        }
+        let mut admission = RaceAdmission::from_locked(&record, &self.local(), bindings).map_err(|e| fail(e.to_string()))?;
+        let now = holochain_moq_hdk_bridge::unix_now_ms();
+        for m in &mut admission.members {
+            let fresh = self.directory.recent_endpoint_bindings(&m.agent).await?;
+            let live: Vec<_> = fresh.into_iter().map(|(_, p)| p).filter(|p|
+                holochain_moq_turbo_kart::race::binding_verifies(p) && p.advertisement.peer_endpoint.agent == m.agent
+                && p.advertisement.endpoint().kind == EndpointKind::Iroh
+                && p.advertisement.published_at <= now && p.advertisement.expires_at.is_some_and(|t| t > now)).collect();
+            if live.iter().any(|p| p.advertisement.endpoint().transport_identity.fingerprint != m.endpoint_id) {
+                return Err(fail(format!("endpoint identity changed for {}", m.agent)));
+            }
+            // Signed setup hints remain usable after presence expiry, e.g. a
+            // delayed peer or reconnect. A fresh signed record updates hints only.
+            if !live.is_empty() { m.endpoints = live.into_iter().map(|p| p.advertisement.peer_endpoint.endpoint).collect(); }
+        }
+        Ok(admission)
     }
 }

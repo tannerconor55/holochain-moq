@@ -55,6 +55,12 @@ pub struct RaceResultEntry {
     pub result: RaceResult,
 }
 
+#[hdk_entry_helper]
+#[derive(Clone, PartialEq)]
+pub struct RaceSetupEntry {
+    pub setup: kart::race::RaceSetup,
+}
+
 #[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
@@ -63,6 +69,7 @@ pub enum EntryTypes {
     LobbyLeaveEntry(LobbyLeaveEntry),
     LobbyStatusEntry(LobbyStatusEntry),
     RaceResultEntry(RaceResultEntry),
+    RaceSetupEntry(RaceSetupEntry),
 }
 
 #[hdk_link_types]
@@ -80,6 +87,7 @@ pub enum LinkTypes {
     /// path(`kart::leaderboard_path(track, band)`) -> `RaceResultEntry`;
     /// tag = best_lap_ms, big-endian u32
     LeaderboardBand,
+    LobbyToRace,
 }
 
 #[hdk_extern]
@@ -159,6 +167,26 @@ fn validate_entry(
                     "LobbyStatus: only the lobby host {} may set its status, not {author}",
                     lobby.host
                 ));
+            }
+            Ok(ValidateCallbackResult::Valid)
+        }
+        EntryTypes::RaceSetupEntry(e) => {
+            if let Err(why) = e.setup.validate() { return invalid(why); }
+            let (host, lobby) = match must_get_lobby(&e.setup.lobby)? {
+                Ok(value) => value, Err(why) => return invalid(why),
+            };
+            if &host != author || lobby != e.setup.config {
+                return invalid("race must be authored by its lobby host with the exact lobby configuration".into());
+            }
+            for p in &e.setup.participants {
+                let Some(join) = parse_action_hash(&p.member.join) else { return invalid("invalid join reference".into()); };
+                let record = must_get_valid_record(join)?;
+                match record_entry(&record)? {
+                    Some(EntryTypes::LobbyJoinEntry(ej)) if ej.join.lobby == e.setup.lobby
+                        && ej.join.player == p.member.player && ej.join.character_id == p.member.character_id
+                        && record.action().author().to_string() == p.member.player => {},
+                    _ => return invalid("race participant does not match a validated lobby join".into()),
+                }
             }
             Ok(ValidateCallbackResult::Valid)
         }
@@ -289,6 +317,7 @@ fn validate_lobby_link(
         (LinkTypes::LobbyToLeave, Some(EntryTypes::LobbyLeaveEntry(e))) => {
             lobby_base(&e.leave.lobby)
         }
+        (LinkTypes::LobbyToRace, Some(EntryTypes::RaceSetupEntry(e))) => lobby_base(&e.setup.lobby),
         (LinkTypes::LobbyToStatus, Some(EntryTypes::LobbyStatusEntry(e))) => {
             lobby_base(&e.status.lobby)
         }
@@ -319,7 +348,12 @@ fn validate_lobby_link(
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
         FlatOp::CreateEntry(OpEntry::CreateEntry { app_entry, action }) => {
-            validate_entry(action.author(), &app_entry)
+            let result = validate_entry(action.author(), &app_entry)?;
+            if result != ValidateCallbackResult::Valid { return Ok(result); }
+            if let EntryTypes::RaceSetupEntry(e) = &app_entry {
+                return validate_race_chain(&action, &e.setup);
+            }
+            Ok(result)
         }
         FlatOp::CreateEntry(_) => Ok(ValidateCallbackResult::Valid),
         FlatOp::Link(OpLink::CreateLink { link_type, action }) => match link_type {
@@ -327,6 +361,7 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             LinkTypes::LobbyBucket
             | LinkTypes::LobbyToJoin
             | LinkTypes::LobbyToLeave
+            | LinkTypes::LobbyToRace
             | LinkTypes::LobbyToStatus
             | LinkTypes::LeaderboardBand => validate_lobby_link(link_type, &action),
         },
@@ -339,9 +374,63 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
         FlatOp::Update(_) => Ok(ValidateCallbackResult::Invalid(
             "entries are append-only in this DNA; publish a new one instead".into(),
         )),
-        FlatOp::Delete(_) => Ok(ValidateCallbackResult::Invalid(
-            "deleting entries is not supported in this DNA".into(),
-        )),
+        FlatOp::Delete(OpDelete { action }) => {
+            // Capability revocation is a system-entry delete. Rejecting it
+            // warrants an honest agent when Electron retires its sidecar key.
+            // Inspect only the original action: the grant entry is private.
+            let original = must_get_action(action.deletes_address.clone())?;
+            if matches!(original.action().entry_type(), Some(EntryType::CapGrant)) {
+                Ok(ValidateCallbackResult::Valid)
+            } else {
+                Ok(ValidateCallbackResult::Invalid(
+                    "deleting entries is not supported in this DNA".into(),
+                ))
+            }
+        }
         FlatOp::CreateRecord(_) | FlatOp::AgentActivity(_) => Ok(ValidateCallbackResult::Valid),
     }
+}
+
+/// Uniqueness and host lifecycle are checked against the host's signed chain,
+/// never DHT timestamps. Hash-bounded to the referenced lobby creation.
+fn validate_race_chain(action: &TypedAction<CreateData>, setup: &kart::race::RaceSetup) -> ExternResult<ValidateCallbackResult> {
+    let now = action.timestamp().as_millis();
+    if setup.participants.iter().any(|p| now < p.binding_published_at_ms || now > p.binding_expires_at_ms) {
+        return invalid("race_not_ready: endpoint binding is not fresh at race commit".into());
+    }
+    let Some(prev) = action.prev_action().cloned() else { return invalid("race has no chain predecessor".into()); };
+    let Some(stop) = parse_action_hash(&setup.lobby) else { return invalid("invalid lobby".into()); };
+    let activity = must_get_agent_activity(action.author().clone(), ChainFilter::until_hash(prev, stop.clone()))?;
+    if activity.len() > 4096 { return invalid("lobby host chain exceeds race setup limit".into()); }
+    let mut host_join = false;
+    let mut reached_lobby = false;
+    let mut status = None;
+    // Newest first; action sequence orders same-millisecond writes.
+    let mut activity = activity;
+    activity.sort_by_key(|a| std::cmp::Reverse(a.action.hashed.content.action_seq()));
+    for a in activity {
+        if a.action.hashed.hash == stop { reached_lobby = true; continue; }
+        let content = &a.action.hashed.content;
+        let (Some(EntryType::App(def)), Some(hash)) = (content.entry_type(), content.entry_hash()) else { continue; };
+        let entry = match a.cached_entry { Some(e) => e, None => must_get_entry(hash.clone())?.content };
+        if let Some(e) = EntryTypes::deserialize_from_type(def.zome_index, def.entry_index, &entry)? {
+            match e {
+                EntryTypes::RaceSetupEntry(r) if r.setup.lobby == setup.lobby => return invalid("race_conflict: this lobby already has its immutable race".into()),
+                EntryTypes::LobbyStatusEntry(s) if s.status.lobby == setup.lobby => {
+                    if s.status.state.is_terminal() { return invalid("race lobby is closed".into()); }
+                    if status.is_none() { status = Some(s.status.state); }
+                },
+                EntryTypes::LobbyLeaveEntry(l) if l.leave.lobby == setup.lobby && !host_join => return invalid("race host left before start".into()),
+                EntryTypes::LobbyJoinEntry(j) if j.join.lobby == setup.lobby => {
+                    if !host_join && !setup.participants.iter().any(|p| p.member.player == setup.config.host && p.member.join == a.action.hashed.hash.to_string()) {
+                        return invalid("race host join is not its latest membership".into());
+                    }
+                    host_join = true;
+                },
+                _ => {},
+            }
+        }
+    }
+    if !reached_lobby || !host_join || status != Some(kart::LobbyState::Open) { return invalid("race needs an open lobby and active host".into()); }
+    Ok(ValidateCallbackResult::Valid)
 }

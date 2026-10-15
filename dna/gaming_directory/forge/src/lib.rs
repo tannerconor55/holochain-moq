@@ -10,6 +10,13 @@ use moq_directory_integrity::{
     EntryTypes, GameEntry, GameReleaseEntry, LinkTypes, PeerEndpointEntry,
 };
 
+/// Test only: attempt a deletion (of a directory record, or of another
+/// agent's capability grant) so integrity must reject it.
+#[hdk_extern]
+pub fn forge_delete_entry(hash: ActionHash) -> ExternResult<ActionHash> {
+    delete_entry(hash)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ForgeEntry {
     Endpoint {

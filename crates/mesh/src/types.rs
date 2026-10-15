@@ -458,6 +458,24 @@ pub struct PeerStatus {
     pub state: PeerState,
     /// WP6: reconnect counters.
     pub reconnect: ReconnectStats,
+    /// E6.INTERNET.2: this side's initial dialing (designated dialer only).
+    pub initial_dial: InitialDialStats,
+}
+
+/// E6.INTERNET.2: what the designated dialer's initial dialing has done so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InitialDialStats {
+    /// Attempts started (each is one dial plus, if it links, one handshake).
+    pub attempts: u32,
+    /// The most recent attempt's failure, if any.
+    pub last_error: Option<String>,
+    /// Dialing stopped at a failure retrying cannot fix
+    /// ([`crate::TerminalDialError`]: authentication or refusal).
+    pub terminal: bool,
+    /// Dialing stopped because `MeshConfig::dial_deadline` passed.
+    pub deadline_exceeded: bool,
+    /// Dialing is over (connected, failed or stopped); no attempt is pending.
+    pub finished: bool,
 }
 
 /// Why an incoming or outgoing connection was refused before any track

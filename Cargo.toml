@@ -35,12 +35,15 @@ members = [
     "crates/audio-adapt",
     "crates/codec-av1",
     "crates/holochain-e2e",
+    "apps/turbo-kart-desktop/sidecar",
     "examples/two-peer",
     "examples/generated-stream",
 ]
 
-# The DNA (wasm32 zomes) is its own Cargo workspace; see dna/.
-exclude = ["dna"]
+# The DNA (wasm32 zomes) is its own Cargo workspace; see dna/. So is the frozen
+# Tauri shell (apps/turbo-kart-desktop/src-tauri), which needs WebKitGTK. The
+# Electron app's kart-net sidecar (apps/turbo-kart-desktop/sidecar) is a member.
+exclude = ["dna", "apps/turbo-kart-desktop/src-tauri"]
 
 [workspace.package]
 edition = "2021"

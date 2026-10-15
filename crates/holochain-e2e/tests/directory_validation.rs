@@ -828,3 +828,133 @@ async fn the_platform_and_game_dnas_expose_only_their_own_functions() {
         assert!(r.is_err(), "the Turbo Kart DNA must not expose {f}");
     }
 }
+
+async fn forge_delete(net: &Network, i: usize, hash: ActionHash) -> Result<ActionHash, String> {
+    net.conductors[i]
+        .call_fallible(&net.cells[i].zome("forge"), "forge_delete_entry", hash)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// E6.5a.1: Electron retires a sidecar's directory capability by revoking it
+/// (a Delete of the CapGrant). That must be valid - no invalid op, so no
+/// warrant, and the agent stays served by its peers - while directory,
+/// registry and identity records stay undeletable and nobody may delete
+/// another agent's grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn capability_revocation_is_valid_but_directory_deletion_is_rejected() {
+    use holochain_types::prelude::{
+        CapAccess, CapSecret, GrantZomeCallCapabilityPayload, GrantedFunctions, ZomeCallCapGrant,
+    };
+    use std::collections::{BTreeSet, HashSet};
+
+    let net = network_with(2, &forge_dna_bundle()).await;
+    let admin = holochain_client::AdminWebsocket::connect(
+        (std::net::Ipv4Addr::LOCALHOST, net.admin_port(BOB)),
+        None,
+    )
+    .await
+    .unwrap();
+    let cell = net.cells[BOB].cell_id().clone();
+    let payload = |tag: &str| GrantZomeCallCapabilityPayload {
+        cell_id: cell.clone(),
+        cap_grant: ZomeCallCapGrant {
+            tag: tag.into(),
+            functions: GrantedFunctions::Listed(HashSet::from([(
+                "moq_directory".into(),
+                "get_endpoint_binding".into(),
+            )])),
+            access: CapAccess::Assigned {
+                secret: CapSecret::from([7; 64]),
+                assignees: BTreeSet::from([net.agent(ALICE)]),
+            },
+        },
+    };
+    // A sidecar's grant, revoked as Electron does on sidecar exit / app quit.
+    let retired = admin
+        .grant_zome_call_capability(payload("E6.5a.1-sidecar"))
+        .await
+        .unwrap();
+    admin
+        .revoke_zome_call_capability(cell.clone(), retired)
+        .await
+        .expect("revoking one's own capability grant is valid");
+    // A second, live grant for the unauthorized-delete attempt below.
+    let live = admin
+        .grant_zome_call_capability(payload("E6.5a.1-live"))
+        .await
+        .unwrap();
+    net.settle().await;
+    for conductor in net.conductors.iter() {
+        assert!(
+            conductor
+                .get_invalid_integrated_ops(net.cells[BOB].dna_hash())
+                .await
+                .unwrap()
+                .is_empty(),
+            "capability revocation must not create invalid DHT ops (warrants)"
+        );
+    }
+
+    // Bob is still served by Alice in this network: his next binding reaches her.
+    let (bob, kb) = (net.agent_b64(BOB), SecretKey::generate());
+    let binding_hash = call(
+        &net,
+        BOB,
+        "publish_signed_presence",
+        signed(iroh_ad(&bob, &kb, 1_000, Some(121_000)), &kb, &bob),
+    )
+    .await
+    .expect("presence after revocation");
+    net.settle().await;
+    let seen: Option<SignedPresence> = net.conductors[ALICE]
+        .call(&net.zome(ALICE), "get_endpoint_binding", binding_hash.clone())
+        .await;
+    assert!(seen.is_some(), "Alice retrieves Bob's binding after his revocation");
+
+    // Ordinary data stays undeletable: an endpoint binding, a registry game.
+    rejected(
+        forge_delete(&net, BOB, binding_hash.clone()).await,
+        "deleting an endpoint binding must remain forbidden",
+    );
+    let game_hash = forge(&net, BOB, ForgeEntry::Game(game("e651-cap", &bob)))
+        .await
+        .expect("a valid game registration");
+    rejected(
+        forge_delete(&net, BOB, game_hash).await,
+        "deleting a registry game must remain forbidden",
+    );
+    // Unauthorized: Alice may not revoke (delete) Bob's grant.
+    let err = forge_delete(&net, ALICE, live)
+        .await
+        .expect_err("deleting another agent's capability grant must be refused");
+    assert!(
+        err.contains("nvalid") || err.contains("nresolved") || err.contains("not found"),
+        "unexpected refusal: {err}"
+    );
+    // Malformed: a delete whose target is not an action that exists.
+    assert!(
+        forge_delete(&net, BOB, ActionHash::from_raw_36(vec![9; 36]))
+            .await
+            .is_err(),
+        "deleting a nonexistent action is refused"
+    );
+    net.settle().await;
+    for conductor in net.conductors.iter() {
+        assert!(
+            conductor
+                .get_invalid_integrated_ops(net.cells[BOB].dna_hash())
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused deletes never reach the DHT"
+        );
+    }
+    assert!(
+        net.conductors[ALICE]
+            .call::<_, Option<SignedPresence>>(&net.zome(ALICE), "get_endpoint_binding", binding_hash)
+            .await
+            .is_some(),
+        "the binding survives the refused delete"
+    );
+}

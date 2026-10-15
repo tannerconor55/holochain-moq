@@ -1,0 +1,41 @@
+{
+  "comment": "E7.WINDOWS.1 (owner decision D2): the exact inputs a Windows package is built from. The hApps and game UI are the verified Linux release v0.3's bytes (never rebuilt on Windows); the licence inputs are generated on Linux for the Windows target. scripts/prepare-windows-inputs.mjs (Linux) and scripts/build-windows.mjs (Windows) refuse anything that differs. Change only together with a deliberate new release.",
+  "source_release": {
+    "name": "turbo-kart-demo-v0.3-internet-stability",
+    "deb": "dev.holochain-moq.turbo-kart_0.1.2_amd64.deb",
+    "deb_sha256": "83f20ff7206da0389ace719f4aa779175fef058c14c2fcdd7c5bd2104ac03f42",
+    "verified": "2026-10-12: SHA256SUMS of the release checked OK; gaming_platform.happ, kangaroo.happ and expected-dna-hashes.json extracted from the .deb are byte-identical to the pins below; turbo_kart.webhapp equals the sha256 the v0.3 manifest records"
+  },
+  "app_version": "0.1.2",
+  "dna_hashes": {
+    "gaming_directory": "uhC0krooLUR59MWx49qVax9ZciBgppVxWMnMPYk9aS1MUyuv1p1Bp",
+    "turbo_kart": "uhC0k50xschph7WNzqvdIjIHg8lsoHwl2o0moMqbuBojhOf52KB-G"
+  },
+  "files": {
+    "turbo_kart.webhapp": { "sha256": "1c04531adfff97c332edd560e5b860075220755ddb1899435e4216714317cfb2", "size": 12905242 },
+    "gaming_platform.happ": { "sha256": "f96ba4dd1264425037e48ee255795d2d0b4b08155721edaa6792ba8006479a54", "size": 1043311 },
+    "kangaroo.happ": { "sha256": "30e0c66742e181d71e6411bd77fdd5bb96496d2117e3e6790af4b6d2792331c6", "size": 1095371, "note": "unpacked from turbo_kart.webhapp by `yarn pouch:unpack`; not shipped separately" },
+    "expected-dna-hashes.json": { "sha256": "1542c29f2ac98948eec14648e7eadc1a6fa41809baa6b4e5da7cba73bbcb973a" }
+  },
+  "ui": {
+    "files": 66,
+    "tree_digest_bytewise": "093872c3f1c496a73b1860f1523cc6e1b23b9f3e9c97628239217b0d4c6fa3cc",
+    "tree_digest_en_US": "f6adf9beca2fe2d6543bb395ccd1b74abaaae4f6b10ecc612552d1081462576c",
+    "digest_rule": "sha256 of the lines '<sha256>  ./<path>\\n' for every file under resources/ui, ordered by path. bytewise: byte order (C locale, reproducible on every OS). en_US: `sort -z` under en_US.UTF-8, the value tk-demo.sh printed for v0.3. Same 66 files.",
+    "LICENSE": "49965a4d83a2412eb7cd2ec46fb1d42b0a4b9bce92d9ab6cbbddcd023472eda6",
+    "NOTICE": "336bf3d580de5b1fb3d39d39f4a0743cde96e9edb0204ef440486058510c9b09"
+  },
+  "licences": {
+    "target": "x86_64-pc-windows-msvc",
+    "three.js-LICENSE.txt": "4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454",
+    "CAL-1.0.txt": "ba9a0aa1ece7672d2bd75461b6a8aa767212cc08990d82de26125c7c5b5f69a6",
+    "RUST-CRATES.txt": "e3154f1851b7298b63f9a57e0b01b7f4eb12d945df1ba995be9629c38d4cbefb",
+    "rust_crates": 435,
+    "note": "RUST-CRATES.txt lists the sidecar's crates for x86_64-pc-windows-msvc plus the zomes' (cargo tree --target, offline, locked). NPM-PACKAGES.txt, THIRD-PARTY-NOTICES.txt, electron-LICENSE.txt and manifest.json are generated on Windows from the installed packages."
+  },
+  "native_binaries": {
+    "comment": "Downloaded by scripts/fetch-binaries.js and checked against kangaroo.config.ts; these equal the 'digest' GitHub publishes for the holochain-0.7.0 release assets (checked 2026-10-12). Upstream ships them unsigned and dynamically linked to VCRUNTIME140.dll.",
+    "holochain-x86_64-pc-windows-msvc.exe": { "sha256": "5d9bd8cf28c45645158d56198cfec38d04ac4cf620ba89ca37db2f7c46d7b3d2", "size": 47912448 },
+    "lair-keystore-x86_64-pc-windows-msvc.exe": { "sha256": "2c1fded6eb7c6ec4b3d033c6a310d7c2cc916d6e0ac10c2f71047ebb6b623f6b", "size": 10379264 }
+  }
+}

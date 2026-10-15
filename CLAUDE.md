@@ -84,6 +84,8 @@ These are hard constraints unless a task explicitly changes them.
 
 24. **Realtime resources are bounded per object, peer, session and broadcast (WP9).** Anything a remote can make an endpoint hold has a documented limit enforced by the receiver (see ARCHITECTURE.md "Realtime hardening (WP9)"). These are application-level controls, not DDoS protection; never enforce them through Holochain.
 
+25. **The desktop app is Electron/Kangaroo (WP10 E2), `apps/turbo-kart-desktop/`.** Kangaroo is pinned (`UPSTREAM-KANGAROO.md` and the app README name the commit); the Tauri shell in `src-tauri/` is frozen reference, never a second entry point. The game renderer holds **no Holochain credentials** (no app token, port or zome-call signer) and has no Node, filesystem, shell or generic IPC: sandbox, contextIsolation, CSP, navigation and popups blocked, DevTools off when packaged. Its only API is `window.kartNet` (E3: six lobby calls + lobby events) → fixed, sender-checked, validated IPC in main → the `kart-net-sidecar` process. The sidecar never gets the conductor's admin interface or Lair: main provisions single-use app tokens and a capability assigned to the sidecar's own signing key for exactly the lobby functions it calls (widen that list only deliberately, in `src/main/kartNet/provision.ts`). JSON on that path is for the control plane only; realtime kart state needs a separate binary path. Both hApps install under one agent with no network seed; `expected-dna-hashes.json` must change only together with a deliberate DNA change (rule 20). Never ship or document `--no-sandbox` as a fix.
+
 ## Current architecture
 
 ```text

@@ -1,18 +1,15 @@
 //! WP10 (first slice): the game-facing Rust bridge for Turbo Kart.
 //!
 //! ```text
-//! WebView (turbo-kart-rally)  ──Tauri IPC (serde, low frequency)──▶  KartNet (this crate)
+//! Electron renderer         ──bounded JSON IPC / sidecar─────▶  KartNet (this crate)
 //!                                                                      │ lobby CRUD
 //!                                                                      ▼
 //!                                               TurboKartClient ─▶ Holochain conductor
 //!                                               (turbo_kart DNA + gaming_directory DNA)
 //! ```
 //!
-//! Each method is one future Tauri command (`net_init`, `lobby_create`,
-//! `lobby_list`, `lobby_join`, `lobby_leave`, plus `lobby_get`), with typed,
-//! serde request/response/error types. The crate has no Tauri dependency yet:
-//! a desktop crate wraps each method in a `#[tauri::command]` and forwards
-//! [`KartNet::lobby_events`] to a Tauri event.
+//! Typed lobby/race commands are exposed by the Electron sidecar through the
+//! allowlisted window.kartNet preload. This crate has no Electron dependency.
 //!
 //! **Control plane only.** Holochain owns lobby identity, membership and
 //! status; this crate keeps no copy of them (every state it returns was just
@@ -20,8 +17,10 @@
 //! `mesh-iroh`, `clock`, `host`, `kart-wire`): creating, listing, joining or
 //! leaving a lobby cannot produce MoQ traffic. Race start - turning an
 //! admitted lobby into a realtime `RaceSession` via `RaceAdmission` - is a
-//! later WP10 step, as is publishing iroh presence (it needs the realtime
-//! endpoint's key); lobby calls here publish none.
+//! E6.1 control-plane step: an immutable Holochain race setup, checked through
+//! the existing RaceAdmission. The sidecar owns endpoint readiness; this crate
+//! creates no realtime session, publishers or kart traffic.
+
 
 use std::sync::Arc;
 
@@ -62,6 +61,8 @@ pub enum NetErrorCode {
     AgentMismatch,
     /// The conductor refused or failed the call.
     ControlPlane,
+    NotHost,
+    RaceNotReady,
 }
 
 impl NetError {
@@ -89,6 +90,8 @@ impl From<KartError> for NetError {
             {
                 NetErrorCode::InvalidInput
             }
+            KartError::NotHost => NetErrorCode::NotHost,
+            KartError::RaceNotReady(_) => NetErrorCode::RaceNotReady,
             KartError::Holochain(_) => NetErrorCode::ControlPlane,
         };
         Self::new(code, e.to_string())
@@ -437,6 +440,21 @@ impl KartNet {
             left: state.as_ref().is_none_or(|s| !s.is_member(&self.agent)),
             state,
         })
+    }
+
+    /// E6.2 session setup: no renderer-provided admission or addresses.
+    pub async fn session_admission(&self, lobby_id: &str) -> Result<holochain_moq_turbo_kart_client::race::RaceAdmission, NetError> {
+        Ok(self.client.session_admission(lobby_id).await?)
+    }
+
+    pub async fn race_get(&self, lobby_id: &str) -> Result<holochain_moq_turbo_kart_client::race::RaceReadiness, NetError> {
+        Ok(self.client.race_readiness(lobby_id).await?)
+    }
+
+    pub async fn race_start(&self, lobby_id: &str) -> Result<kart::race::RaceRecord, NetError> {
+        let record = self.client.start_race(lobby_id).await?;
+        self.emit(LobbyEvent::Updated { state: self.read(lobby_id).await? });
+        Ok(record)
     }
 
     async fn read(&self, lobby_id: &str) -> Result<LobbyState, NetError> {

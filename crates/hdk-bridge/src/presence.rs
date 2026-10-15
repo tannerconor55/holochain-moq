@@ -74,6 +74,22 @@ impl HolochainPeerDirectory {
         Ok(ads)
     }
 
+    pub async fn recent_endpoint_bindings(&self, agent: &str) -> Result<Vec<(String, SignedPresence)>, DirectoryError> {
+        let key = crate::parse_agent(agent)?;
+        let values: Vec<(String, SignedPresence)> = self.call("get_recent_endpoint_bindings", &key).await?;
+        if values.len() > holochain_moq_protocol::MAX_RECENT_ADS
+            || values.iter().any(|(id, p)| parse_action_hash(id, "get_recent_endpoint_bindings").is_err()
+                || p.advertisement.peer_endpoint.agent != agent) {
+            return Err(DirectoryError::InvalidResponse { call: "get_recent_endpoint_bindings", reason: "invalid endpoint references".into() });
+        }
+        Ok(values)
+    }
+
+    pub async fn endpoint_binding(&self, id: &str) -> Result<Option<SignedPresence>, DirectoryError> {
+        let hash = parse_action_hash(id, "get_endpoint_binding")?;
+        self.call("get_endpoint_binding", &hash).await
+    }
+
     /// An advertisement of `endpoint` for this agent, valid for `ttl_ms` from
     /// `now_ms`, with the EndpointId's `binding_signature`.
     pub fn presence(

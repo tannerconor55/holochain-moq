@@ -1,0 +1,140 @@
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  /* to match the main window */
+  font-family: 'gilroyextrabold', Helvetica, sans-serif;
+  /* background: linear-gradient(90deg, #0edad3, #4622e3); */
+}
+
+.flex {
+  display: flex;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  flex-direction: row;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.hidden {
+  display: none;
+}
+
+.splash-wrapper {
+  display: flex;
+  flex-direction: row;
+}
+
+.splash-image-wrapper {
+  width: 320px;
+  height: 450px;
+  padding: 30px;
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+}
+
+.splash-image-caption {
+  font-family: 'PlusJakartaSans-bold', Helvetica, sans-serif;
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.splash-content-wrapper {
+  align-items: center;
+  margin-top: 30px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 30px 40px;
+}
+
+.splash-product-name {
+  font-family: 'gilroyextrabold', Helvetica, sans-serif;
+  font-size: 40px;
+  color: #222222;
+  margin-bottom: 2px;
+}
+
+.splash-version {
+  font-family: 'gilroyextrabold', Helvetica, sans-serif;
+  font-size: 14px;
+  color: #898989;
+  margin-left: 2px;
+}
+
+.splash-loading-message {
+  font-family: 'gilroyextrabold', Helvetica, sans-serif;
+  margin-top: 110px;
+  font-size: 18px;
+  color: #414141;
+}
+
+.splash-description {
+  font-family: 'PlusJakartaSans-regular', Helvetica, sans-serif;
+  font-size: 14px;
+  color: #585858;
+  width: 365px;
+}
+
+.splash-license {
+  font-family: 'PlusJakartaSans-bold', Helvetica, sans-serif;
+  font-size: 12px;
+  color: #898989;
+  position: absolute;
+  bottom: 3px;
+  left: 5px;
+}
+
+.pw-input {
+  height: 30px;
+  width: 200px;
+  border-radius: 5px;
+  font-size: 16px;
+}
+
+button {
+  height: 26px;
+  min-width: 80px;
+  cursor: pointer;
+}
+
+.warning {
+  color: rgb(193, 0, 0);
+  font-size: 14px;
+  min-height: 16px;
+}
+
+.red {
+  color: rgb(193, 0, 0);
+}
+
+.previous-step-btn {
+  position: fixed;
+  top: 6px;
+  left: 6px;
+}

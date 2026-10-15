@@ -554,9 +554,25 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
         FlatOp::Update(_) => Ok(ValidateCallbackResult::Invalid(
             "entries are append-only in this DNA; publish a new one instead".into(),
         )),
-        FlatOp::Delete(_) => Ok(ValidateCallbackResult::Invalid(
-            "deleting entries is not supported in this DNA".into(),
-        )),
+        FlatOp::Delete(OpDelete { action }) => {
+            // E6.5a.1 (as turbo_kart since E4): capability revocation is a
+            // system-entry delete. Rejecting it got an honest agent warranted
+            // whenever Electron retired its sidecar's directory grant, and
+            // peers then stopped serving that agent in this network. Only the
+            // original action is inspected (the grant entry is private), and
+            // only its own author may revoke it. Every directory, registry and
+            // identity record stays undeletable.
+            let original = must_get_action(action.deletes_address.clone())?;
+            if matches!(original.action().entry_type(), Some(EntryType::CapGrant))
+                && original.action().author() == action.author()
+            {
+                Ok(ValidateCallbackResult::Valid)
+            } else {
+                Ok(ValidateCallbackResult::Invalid(
+                    "deleting entries is not supported in this DNA".into(),
+                ))
+            }
+        }
         FlatOp::CreateRecord(_) | FlatOp::AgentActivity(_) => Ok(ValidateCallbackResult::Valid),
     }
 }

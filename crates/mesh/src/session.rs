@@ -60,7 +60,8 @@ use tokio::task::AbortHandle;
 use crate::error::MeshError;
 use crate::transport::{MeshTransport, TrackSink, TrackSource, TransportSession};
 use crate::types::{
-    ConnectionKind, DeliveryMode, HistoryUnavailable, LimitViolation, MeshEvent, MeshObject,
+    ConnectionKind, DeliveryMode, HistoryUnavailable, InitialDialStats, LimitViolation, MeshEvent,
+    MeshObject,
     PeerBinding, PeerState, PeerStatus, PublisherStats, RaceId, ReconnectConfig, ReconnectStats,
     RejectReason, Role, SessionEnd, Source, SubscriptionStats, TrackName, TrackPath,
     LATEST_MAX_PAYLOAD, RELIABLE_MAX_BYTES, RELIABLE_MAX_OBJECTS, RELIABLE_MAX_PAYLOAD,
@@ -82,6 +83,10 @@ pub struct MeshConfig {
     /// Initial connection attempts per peer (reconnection is `reconnect`).
     pub dial_attempts: u32,
     pub dial_retry: Duration,
+    /// E6.INTERNET.2: optional overall bound on initial dialing, from mesh
+    /// start. No attempt starts, and no pending dial or handshake continues,
+    /// after it. `None` (the default): only `dial_attempts` bounds it.
+    pub dial_deadline: Option<Duration>,
     /// How often a live peer's path kind is re-read for `ConnectionKindChanged`.
     pub status_interval: Duration,
     pub event_capacity: usize,
@@ -95,6 +100,7 @@ impl Default for MeshConfig {
             dial_policy: DialPolicy::LowerDials,
             dial_attempts: 5,
             dial_retry: Duration::from_millis(200),
+            dial_deadline: None,
             status_interval: Duration::from_millis(500),
             event_capacity: 1024,
             reconnect: ReconnectConfig::default(),
@@ -161,6 +167,8 @@ struct Slot {
     outage_since: Option<Instant>,
     attempts: u32,
     stats: ReconnectStats,
+    /// E6.INTERNET.2: initial dialing progress (designated dialer).
+    dial: InitialDialStats,
     conn: watch::Sender<Conn>,
 }
 
@@ -258,6 +266,7 @@ impl<T: MeshTransport> MeshSession<T> {
                         outage_since: None,
                         attempts: 0,
                         stats: ReconnectStats::default(),
+                        dial: InitialDialStats::default(),
                         conn: watch::channel(Conn::Down).0,
                     },
                 )
@@ -459,6 +468,7 @@ impl<T: MeshTransport> MeshSession<T> {
                             counters: info.counters,
                             state: slot.state,
                             reconnect: slot.stats.clone(),
+                            initial_dial: slot.dial.clone(),
                         }
                     }
                     None => PeerStatus {
@@ -471,6 +481,7 @@ impl<T: MeshTransport> MeshSession<T> {
                         counters: None,
                         state: slot.state,
                         reconnect: slot.stats.clone(),
+                        initial_dial: slot.dial.clone(),
                     },
                 }
             })
@@ -683,34 +694,103 @@ impl<T: MeshTransport> Inner<T> {
         } else {
             1
         };
+        // E6.INTERNET.2: optional overall bound (from mesh start). Attempts
+        // run one at a time; a pending dial or handshake is cut off at it.
+        let deadline = self
+            .config
+            .dial_deadline
+            .map(|d| tokio::time::Instant::now() + d);
+        let remaining = || deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
         let mut last_err = String::new();
+        let mut terminal = false;
+        let mut deadline_exceeded = false;
         for attempt in 0..attempts {
             if attempt > 0 {
+                if remaining().is_some_and(|r| r <= self.config.dial_retry) {
+                    deadline_exceeded = true;
+                    break;
+                }
                 tokio::time::sleep(self.config.dial_retry).await;
             }
             if self.closing() || self.connected(&agent) {
+                self.with_slot(&agent, |s| s.dial.finished = true);
                 return;
             }
-            let link = match self.transport.dial(&addr).await {
+            self.with_slot(&agent, |s| s.dial.attempts += 1);
+            let dialed = match remaining() {
+                Some(r) => match tokio::time::timeout(r, self.transport.dial(&addr)).await {
+                    Ok(d) => d,
+                    Err(_) => {
+                        last_err = "dial still pending at the dial deadline".into();
+                        deadline_exceeded = true;
+                        break;
+                    }
+                },
+                None => self.transport.dial(&addr).await,
+            };
+            let link = match dialed {
                 Ok(link) => link,
                 Err(e) => {
-                    last_err = format!("{e:#}");
+                    // Authentication or refusal: retrying cannot fix it.
+                    terminal = crate::error::is_terminal_dial_error(&e);
+                    last_err = if terminal { e.to_string() } else { format!("{e:#}") };
+                    self.with_slot(&agent, |s| s.dial.last_error = Some(last_err.clone()));
+                    if terminal {
+                        break;
+                    }
                     continue;
                 }
             };
             let remote = self.transport.link_remote(&link);
             if remote != expected {
                 // Defence in depth: a transport keeping its contract never gets here.
+                self.with_slot(&agent, |s| {
+                    s.dial.terminal = true;
+                    s.dial.finished = true;
+                    s.dial.last_error = Some("dialed endpoint has a different identity".into());
+                });
                 return self.reject(link, Some(agent), &remote, RejectReason::IdentityMismatch);
             }
             if self.connected(&agent) {
+                self.with_slot(&agent, |s| s.dial.finished = true);
                 return self.reject(link, Some(agent), &remote, RejectReason::Duplicate);
             }
-            match self.transport.establish(link, Role::Dialer, &agent).await {
-                Ok(session) => return self.register(agent, session, Role::Dialer, false),
-                Err(e) => last_err = format!("{e:#}"),
+            let established = match remaining() {
+                Some(r) => match tokio::time::timeout(r, self.transport.establish(link, Role::Dialer, &agent)).await {
+                    Ok(e) => e,
+                    Err(_) => {
+                        last_err = "session handshake still pending at the dial deadline".into();
+                        deadline_exceeded = true;
+                        break;
+                    }
+                },
+                None => self.transport.establish(link, Role::Dialer, &agent).await,
+            };
+            match established {
+                Ok(session) => {
+                    // Registered first, so `finished` never shows before `connected`.
+                    self.register(agent.clone(), session, Role::Dialer, false);
+                    self.with_slot(&agent, |s| s.dial.finished = true);
+                    return;
+                }
+                Err(e) => {
+                    terminal = crate::error::is_terminal_dial_error(&e);
+                    last_err = if terminal { e.to_string() } else { format!("{e:#}") };
+                    self.with_slot(&agent, |s| s.dial.last_error = Some(last_err.clone()));
+                    if terminal {
+                        break;
+                    }
+                }
             }
         }
+        self.with_slot(&agent, |s| {
+            s.dial.finished = true;
+            s.dial.terminal |= terminal;
+            s.dial.deadline_exceeded |= deadline_exceeded;
+            if !last_err.is_empty() {
+                s.dial.last_error = Some(last_err.clone());
+            }
+        });
         if ours && !self.connected(&agent) {
             let never = self.with_slot(&agent, |s| {
                 let never = !s.joined;

@@ -1,0 +1,70 @@
+Turbo Kart Rally - modified desktop multiplayer version
+NOTICE
+
+This program is a modified version of Turbo Kart Rally.
+
+
+1. The original game
+--------------------
+
+Turbo Kart Rally
+MIT License
+Copyright (c) 2026 BridgeMind
+
+The complete, unchanged original licence text is in the file LICENSE that
+accompanies this notice. As the original README states, the original game
+generates every mesh, texture, sound effect and music track in code; that code
+is covered by the licence above.
+
+The original README's disclaimer also applies: Turbo Kart Rally is an original,
+fan-made homage to the kart-racing genre. It is not affiliated with, endorsed
+by, or associated with Nintendo.
+
+
+2. What this version changes
+----------------------------
+
+The following are modifications made for this version. They are not part of
+the original Turbo Kart Rally release.
+
+- Game source: online multiplayer (lobby screens, race entry, a shared start,
+  remote kart and AI state, host-authoritative race progress), additional
+  maps, themes, track details, custom kart models and power-ups, online
+  diagnostics, and the About / Licences screen.
+  Files added after the original release: src/characters.js,
+  src/custom-icons.js, src/custom-kart-list.js, src/custom-karts.js,
+  src/custom-powerups.js, src/environment-themes.js, src/lobby-refresh.js,
+  src/multiplayer.js, src/netdiag.js, src/netplay.js, src/progress.js,
+  src/road-themes.js, src/track-obstacles.js, src/track-textures.js,
+  src/about.js and src/maps/. Several original files (for example
+  src/main.js, src/menu.js, src/hud.js, src/kart.js) were also changed.
+- Electron desktop application, based on Holochain's Kangaroo Electron
+  template.
+- Holochain: player identity, multiplayer discovery, lobbies and race
+  admission.
+- Authenticated realtime networking over iroh and MoQ (a separate "kart-net"
+  sidecar process).
+
+
+3. Assets added in this version
+-------------------------------
+
+  assets/karts/blaze.glb
+  assets/karts/zippy.glb
+  assets/karts/bella.glb
+  assets/portraits/Mystery Racer Kart Reveal.png
+
+These 3D kart models and the portrait image were generated with an AI tool
+by the owner of this modified version. They are not part of the original
+Turbo Kart Rally release and are not covered by BridgeMind's copyright notice
+above. No separate licence has been recorded for them.
+
+
+4. Other components
+-------------------
+
+The MIT licence in LICENSE covers Turbo Kart Rally only. It does not cover
+Electron, Chromium, Holochain, Lair, iroh, MoQ, three.js or any other
+third-party component. Each of those keeps its own licence; the desktop
+application lists them in About / Licences and installs their licence files
+with the application.

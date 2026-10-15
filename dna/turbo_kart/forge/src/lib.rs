@@ -6,8 +6,14 @@ use hdk::prelude::*;
 use holochain_moq_turbo_kart::{Lobby, LobbyJoin, LobbyLeave, LobbyStatus, RaceResult};
 use turbo_kart_integrity::{
     EntryTypes, LinkTypes, LobbyEntry, LobbyJoinEntry, LobbyLeaveEntry, LobbyStatusEntry,
-    RaceResultEntry,
+    RaceResultEntry, RaceSetupEntry,
 };
+
+/// Test only: attempt a game-entry deletion so integrity must reject it.
+#[hdk_extern]
+pub fn forge_delete_entry(hash: ActionHash) -> ExternResult<ActionHash> {
+    delete_entry(hash)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ForgeEntry {
@@ -16,6 +22,7 @@ pub enum ForgeEntry {
     Leave(LobbyLeave),
     Status(LobbyStatus),
     Result(RaceResult),
+    Race(holochain_moq_turbo_kart::race::RaceSetup),
 }
 
 #[hdk_extern]
@@ -25,6 +32,7 @@ pub fn forge_entry(e: ForgeEntry) -> ExternResult<ActionHash> {
         ForgeEntry::Join(join) => EntryTypes::LobbyJoinEntry(LobbyJoinEntry { join }),
         ForgeEntry::Leave(leave) => EntryTypes::LobbyLeaveEntry(LobbyLeaveEntry { leave }),
         ForgeEntry::Status(status) => EntryTypes::LobbyStatusEntry(LobbyStatusEntry { status }),
+        ForgeEntry::Race(setup) => EntryTypes::RaceSetupEntry(RaceSetupEntry { setup }),
         ForgeEntry::Result(result) => EntryTypes::RaceResultEntry(RaceResultEntry { result }),
     })
 }

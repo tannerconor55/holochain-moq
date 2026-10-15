@@ -1204,7 +1204,7 @@ and the migration between them. **Only the parts marked implemented exist**; the
 the agreed direction.
 
 ```text
-                                 Gaming Hub (Tauri app, future)
+                                 Gaming Hub (desktop app, future)
                                   │ list / install / launch games
           ┌───────────────────────┼─────────────────────────────────────────┐
           │ Holochain conductor   │                                         │
@@ -1671,6 +1671,8 @@ second-game fixture) has no kart dependency even for tests.
 | `turbo_kart` (new) | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` | new DNA |
 | `gaming_directory` (registry governance) | `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` | signed iroh presence, registry governance (chain walks, release chain, developer-tagged id links), `crates/platform` and `crates/protocol` changes: integrity code changed |
 | `turbo_kart` (registry governance) | `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` | no Turbo Kart change: `crates/protocol` (compiled into it) gained the signed-presence types and the iroh-address check |
+| `turbo_kart` (WP10 E4) | `uhC0ksSl5OLevlflvqr4BKNAFATLCRyjxlGD0v4Bcf5ZCRKcSTwF3` | allow system capability-grant revocation while preserving append-only game entries; the prior rule warranted honest agents on sidecar restart |
+| `gaming_directory` (E6.5a.1) | `uhC0krooLUR59MWx49qVax9ZciBgppVxWMnMPYk9aS1MUyuv1p1Bp` | accept the Delete of one's own `CapGrant` (capability revocation), as `turbo_kart` since E4; the prior rule got an honest agent warranted whenever Electron retired its sidecar's directory grant. A new network: old profiles are not migrated |
 
 Both are new networks; nothing is migrated (no deployed data existed). Recorded after
 `cargo fmt` on the DNA workspace: formatting alone changed both hashes (source line
@@ -1959,12 +1961,13 @@ limits, fair sharing of the early table between members, Internet-scale abuse ha
 
 ## Game bridge (WP10, first slice: lobby control plane)
 
-`crates/kart-net` (`holochain-moq-kart-net`) is the game-facing Rust bridge. A desktop
-shell (Tauri, not yet in the repo) wraps each `KartNet` method in a `#[tauri::command]`;
-the WebView never talks to Holochain or MoQ directly.
+`crates/kart-net` (`holochain-moq-kart-net`) is the game-facing Rust bridge. The desktop
+app (Electron, see "Desktop shell" below) exposes it to the game as `window.kartNet`,
+backed by a kart-net sidecar process (E3); the renderer never talks to Holochain or MoQ
+directly.
 
 ```text
-WebView (turbo-kart-rally) ──Tauri IPC: typed serde JSON, low-frequency──▶ KartNet (Rust)
+Renderer (turbo-kart-rally) ──IPC: typed serde JSON, low-frequency──▶ KartNet (Rust)
                                                                               │ lobby CRUD
                                                                               ▼
                          TurboKartClient ─▶ conductor: turbo_kart DNA (lobbies, membership,
@@ -1985,7 +1988,7 @@ WebView (turbo-kart-rally) ──Tauri IPC: typed serde JSON, low-frequency─�
 invite_only, status, race_id, members, waitlist, created_at_ms }`, always just read from
 the DNA. Errors are `NetError { code: invalid_input | not_found | agent_mismatch |
 control_plane, message }`. `lobby_events()` is a small typed channel (`Updated` / `Left`)
-fired after this player's own commands, for a future Tauri event.
+fired after this player's own commands, for a future UI event.
 
 Rules:
 
@@ -1998,10 +2001,144 @@ Rules:
   path will use binary payloads, not JSON.
 - **Next (not implemented):** race start turns an admitted lobby into the realtime session:
   publish signed iroh presence, `RaceAdmission::from_view`, start `MeshSession` +
-  `HostSession` (WP8). No Tauri crate, no `net_send_state` / `net_send_event` yet.
+  `HostSession` (WP8). No `net_send_state` / `net_send_event` yet.
 
 Tested against two real conductors with separate agents
 (`crates/holochain-e2e/tests/kart_net.rs`): create → list from the other agent → join →
 both see both members → leave → remaining state; malformed and nonexistent lobby ids;
 an invalid character; a bridge over two different agents refused.
 
+### Desktop shell (WP10 E2/E3: Electron / Kangaroo + kart-net sidecar)
+
+**Decision:** the desktop app is **Electron, packaged with Kangaroo**
+(`holochain/kangaroo-electron`, pinned at `cf5a7f125157c5e72801f5f2b1278fd535d33c08`,
+branch `main-0.7`) in `apps/turbo-kart-desktop/`. The earlier Tauri 2 shell (WP10.2,
+`apps/turbo-kart-desktop/src-tauri/`) is **frozen**: kept as reference (its `ipc.rs`
+`NetSlot` / `IpcError` / config design is the model for E3), not built, not a supported
+entry point. Reasons (E1 spike): Kangaroo is the maintained Holochain 0.7 desktop path
+(conductor + Lair lifecycle, pinned and hash-checked binaries, `.deb` with sandbox and
+AppArmor set-up); the Tauri Holochain plugins are unmaintained for 0.7 and the Tauri
+shell had not been compiled here (WebKitGTK missing).
+
+```text
+Electron main (Node) ── Kangaroo: Lair + holochain 0.7.0 child processes, admin websocket
+   │   installs  gaming_platform.happ  (role gaming_directory)  ┐ one agent key,
+   │             turbo_kart.happ       (role turbo_kart)        ┘ two hApps, two cells
+   │
+   ├─ BrowserWindow: webhapp://webhappwindow/  ← the unchanged game (index.html + src/)
+   │    sandbox · contextIsolation · no Node · CSP · no navigation away
+   │    no Holochain token, port or signer; only window.kartNet (6 calls + lobby events)
+   │         │ 6 fixed ipcMain channels: game top frame only, arguments validated
+   │         ▼
+   │    SidecarHost (src/main/kartNet): ids, 30 s timeouts, ≤ 32 pending, restart
+   │         │ protocol v1: length-prefixed JSON ≤ 64 KiB, Unix socket in a private
+   │         │ 0700 dir (removed after the one authenticated connection)
+   └─▶ kart-net-sidecar (Rust, apps/turbo-kart-desktop/sidecar)
+             NetSlot → KartNet (crates/kart-net, unchanged) → app websockets only
+```
+
+**E3: kart-net sidecar.** The sidecar never sees the admin interface or Lair. It
+generates its own zome-call signing key; main grants a capability **assigned to that
+key** on the `turbo_kart` cell for exactly `create_lobby`, `list_open_lobbies`,
+`get_lobby`, `join_lobby`, `leave_lobby` (nothing on `gaming_directory`), issues one
+single-use 30 s app token per app, and uses two dedicated app interfaces (one per app,
+origin `turbo-kart-sidecar`). These go main → sidecar over the authenticated socket only
+(the session key goes in on stdin). The grant is revoked when that sidecar ends. Same
+agent: checked by main before granting, by `KartNet::from_parts` (`agent_mismatch`), and
+by the e2e against the admin view. Lifecycle: started after both hApps are installed;
+one per app run; a crash fails pending calls at once (`sidecar_unavailable`) and
+restarts it (≤ 5 per minute) with `net_init` re-run; stopped (grant revoked) on quit;
+exits on its own when main's socket closes. Lobby state stays in Holochain only. JSON is
+for this control plane only; the 20–30 Hz kart state will need a separate binary path.
+Details: `apps/turbo-kart-desktop/sidecar/README.md`.
+
+- **Two hApps, one agent.** On first run main generates one agent key and installs both
+  hApps under it, with **no network seed** (the DNA hashes stay the production ones);
+  later runs reuse the agent of whichever is installed. After install the cells' DNA
+  hashes are compared with `expected-dna-hashes.json`; a mismatch stops the app. Stable
+  app ids `gaming_platform` and `turbo_kart`.
+- **The renderer holds no credentials.** Kangaroo's default injection of
+  `__HC_LAUNCHER_ENV__` (app port + app token) and its `__HC_ZOME_CALL_SIGNER__` preload
+  (zome-call signing over IPC) are removed; the game makes no Holochain calls. Holochain
+  access stays in main (Kangaroo's admin connection) and, from E3, in kart-net.
+- **Fresh bundles.** `yarn pack:happs` builds the zomes, packs both DNAs and hApps into a
+  scratch dir (never the possibly stale `dna/workdir/*.happ`), checks the DNA hashes,
+  zips the unchanged game plus an icon, and packs `turbo_kart.webhapp`. Output is
+  byte-reproducible.
+- **Linux:** `.deb` only (its postinst sets `chrome-sandbox` and, with AppArmor, installs
+  an app-specific profile allowing user namespaces). No AppImage (its launcher can fall
+  back to `--no-sandbox`). Packaged binaries have the Electron fuses `runAsNode`,
+  `enableNodeOptionsEnvironmentVariable` and `enableNodeCliInspectArguments` off and
+  `onlyLoadAppFromAsar` on. Development runs need `chrome-sandbox` root-owned and SUID on
+  kernels with `apparmor_restrict_unprivileged_userns=1`; Electron aborts rather than
+  run unsandboxed. See `apps/turbo-kart-desktop/README.md`.
+- **Still unchanged:** lobby CRUD is Holochain control-plane traffic through kart-net;
+  realtime starts only with a race, in a Rust race session, never through the UI bridge
+  (not implemented: no race start, iroh/MoQ session or binary path in the app yet). The
+  bootstrap/relay URLs are still Holochain's dev-test servers.
+
+**E6.4 (online race control).** On top of the E6.2 session, the sidecar's `RaceCtl`
+composes WP4 (`ClockResponder` on the admission host, `ClockSampler` on peers), WP5
+`HostSession` (epoch 1 = admission host; AI on `race/<r>/ai-<n>/state`) and one WP3
+`RaceStart` on the host's reliable `events` track, validated against the immutable
+admission. Holochain is not involved after session start. The design, the recovery
+policy and measurements are in `apps/turbo-kart-desktop/E64-SYNC-AI.md`.
+
+**E6.5a (authoritative race progress).** The track geometry lives only in the game, so
+the host *renderer* derives each racer's progress from host-observed positions (its own
+karts every frame, remote humans from their Rust-attributed lane-4 samples). Rust
+(`sidecar/src/progress.rs`) accepts a snapshot only from the admission host at epoch 1.
+It validates the snapshot against the admission and the previous one: grid kinds,
+configured laps, `TrackSpec.min_lap_ms`, forward-only, and the deterministic standings
+order. It binds the snapshot to race/epoch/schedule and publishes it on the host's
+`Latest` `progress` track. It also derives lap/finish/status events onto the host's
+`ReliableOrdered` `progress-events` track. Peers read both only from the host's source
+and re-validate them. No Holochain call; results are provisional until E6.5c. Details in
+`apps/turbo-kart-desktop/E65A-RACE-PROGRESS.md`.
+
+**E6.5a.1.** An online race simulates in fixed steps driven by both animation frames and a timer (the game window has `backgroundThrottling: false`), so a hidden or covered host keeps AI and authority running. Remote finish times use a bounded send-time estimate.
+
+**Known integrity issue (open).** `gaming_directory` rejects the `CapGrant` delete that capability revocation produces, so peers warrant the revoking agent. `turbo_kart` already accepts it. See `apps/turbo-kart-desktop/E65A1-STABILITY.md` §4.
+
+### Two-desktop lobby integration (WP10 E4)
+
+The real-renderer harness and the demonstrated capability-revocation integrity fix
+are documented in [apps/turbo-kart-desktop/E4-LOBBY-TEST.md](apps/turbo-kart-desktop/E4-LOBBY-TEST.md).
+The Turbo Kart DNA hash changed deliberately; old-profile data does not migrate.
+Local lobby events work; remote membership changes require polling. The existing
+capacity contract wait-lists excess joiners, and leaving does not close a lobby.
+
+### Multiplayer lobby UI (WP10 E5)
+
+The game's menu now uses only `window.kartNet` to browse public lobbies, create and
+join rooms, read authoritative membership, and leave. Its existing character IDs
+and generated portraits are reused. Admitted members and waitlisted players are
+separate; Start Race remains disabled. Browser-only single-player stays available.
+The room polls every 5 seconds and the bounded eight-listing browser every 20
+seconds after completion. Polling and writes share one request gate, local events
+coalesce refreshes, hidden/suspended pages pause requests, and leaving multiplayer
+unsubscribes/cancels timers. No DNA, realtime or Electron security change is needed.
+See [E5-MULTIPLAYER-UI.md](apps/turbo-kart-desktop/E5-MULTIPLAYER-UI.md).
+
+### WP10 E6.1 — immutable race control plane
+
+The host authors one append-only race setup per lobby. Configuration, active members, characters, directory binding references and initial WP5 epoch 1 are locked. Native Rust constructs the existing RaceAdmission from this record; mutable lobby membership is never re-snapshotted for that race. The sidecar binds a persistent direct-only iroh readiness endpoint but creates no MoQ sessions or gameplay tracks. The renderer receives only raceStart/raceGet through the existing bounded JSON IPC. [The E6.1 contract](apps/turbo-kart-desktop/E61-RACE-START.md) documents capability grants, host-chain uniqueness, cross-DNA validation and gossip limitations. This deliberately changes Turbo Kart to `uhC0k50xschph7WNzqvdIjIHg8lsoHwl2o0moMqbuBojhOf52KB-G`; directory integrity stays unchanged.
+
+
+### WP10 E6.2 — authenticated native sessions and binary diagnostics
+
+The sidecar prepares the existing `RaceAdmission` from E6.1's signed immutable
+record and verified directory bindings. It reuses `MeshSession<IrohMeshTransport>`
+for authenticated full mesh, race/source authorization, Latest, ReliableOrdered,
+WP6 reconnect and WP9 limits. Session start requires the local persistent key to
+match the frozen EndpointId. A shared-endpoint transport constructor creates a
+fresh publication origin while preserving existing owned-endpoint semantics.
+
+Three fixed lifecycle commands extend the bounded JSON allowlist. One transferred
+MessagePort and a length-framed inherited Unix duplex pipe carry opaque diagnostic
+bytes; renderer addresses, rosters and track names are never accepted. Active
+sessions refuse control-plane polls/writes, so delivery and reconnect make no zome
+calls. The initial host owns one fixed diagnostic source; WP5 migration/gameplay
+composition is deferred to E6.3. [The E6.2 contract](apps/turbo-kart-desktop/E62-REALTIME-SESSIONS.md)
+documents limits, binary credits, key/port persistence, explicit preparation after
+process crashes and validation qualifications. Both E6.1 DNA hashes are unchanged.

@@ -1,0 +1,46 @@
+[package]
+name = "turbo-kart-sidecar"
+description = "WP10: native kart-net control plane and authenticated mesh sessions for Electron (no admin access)."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "kart-net-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+holochain-moq-kart-net = { path = "../../../crates/kart-net" }
+holochain-moq-hdk-bridge = { workspace = true }
+# Same exact pins as crates/hdk-bridge: the sidecar opens app websockets itself
+# from credentials Electron main provisions (it never gets the admin port).
+holochain_client = "=0.9.0"
+holo_hash = "=0.7.0"
+# The zome-call signing key is generated here and never leaves the process
+# (same versions holochain_client uses for authorize_signing_credentials).
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+# Persistent E6.1 endpoint identity, reused for E6.2 mesh sessions.
+iroh = { workspace = true }
+holochain-moq-protocol = { workspace = true }
+holochain-moq-node = { workspace = true }
+
+# E6.2 reuses the existing WP2/WP3/WP6/WP8/WP9 stack.
+holochain-moq-mesh = { workspace = true }
+holochain-moq-mesh-iroh = { workspace = true }
+holochain-moq-host = { path = "../../../crates/host" }
+holochain-moq-turbo-kart-client = { path = "../../../crates/turbo-kart-client" }
+holochain-moq-turbo-kart = { path = "../../../crates/turbo-kart" }
+bytes = { workspace = true }
+sha2 = { workspace = true }
+anyhow = { workspace = true }
+# E6.3: the WP3 kart-state format, validated in both directions.
+holochain-moq-kart-wire = { path = "../../../crates/kart-wire" }
+# E6.4: WP4 clock synchronisation and scheduled start.
+holochain-moq-clock = { path = "../../../crates/clock" }

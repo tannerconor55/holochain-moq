@@ -9290,6 +9290,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "turbo-kart-sidecar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "ed25519-dalek 2.2.0",
+ "holo_hash",
+ "holochain-moq-clock",
+ "holochain-moq-hdk-bridge",
+ "holochain-moq-host",
+ "holochain-moq-kart-net",
+ "holochain-moq-kart-wire",
+ "holochain-moq-mesh",
+ "holochain-moq-mesh-iroh",
+ "holochain-moq-node",
+ "holochain-moq-protocol",
+ "holochain-moq-turbo-kart",
+ "holochain-moq-turbo-kart-client",
+ "holochain_client",
+ "iroh",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "two-peer"
 version = "0.1.0"
 dependencies = [

@@ -1210,7 +1210,7 @@ record shapes are unchanged except where noted.
 |---|---|---|
 | hApp (`hc app pack`) | `dna/workdir/gaming_directory/` → `gaming_platform.happ` | `dna/workdir/turbo_kart/` → `turbo_kart.happ` |
 | Role | `gaming_directory` | `turbo_kart` |
-| DNA name / hash | `gaming_directory` / `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` | `turbo_kart` / `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` |
+| DNA name / hash | `gaming_directory` / `uhC0krooLUR59MWx49qVax9ZciBgppVxWMnMPYk9aS1MUyuv1p1Bp` | `turbo_kart` / `uhC0ksSl5OLevlflvqr4BKNAFATLCRyjxlGD0v4Bcf5ZCRKcSTwF3` |
 | Integrity / coordinator zome | `moq_directory_integrity` / `moq_directory` | `turbo_kart_integrity` / `turbo_kart` |
 
 Install the platform hApp once per agent and each game hApp under the same `agent_key`.

@@ -1,0 +1,55 @@
+appId: ____PLACEHOLDER____
+productName: ____PLACEHOLDER____
+directories:
+  buildResources: build
+files:
+  - resources
+  - out
+  - kangaroo.config.ts
+asarUnpack:
+  - resources/**
+# E6.INTERNET.2: licence and notice files beside Electron's own licence files
+# (/opt/Turbo Kart Rally/licenses/ on Linux); written by scripts/pack-happs.mjs.
+extraFiles:
+  - from: resources/licenses
+    to: licenses
+# Packaged-app hardening (WP10 E2): the shipped binary cannot be turned into a
+# plain Node (ELECTRON_RUN_AS_NODE), take NODE_OPTIONS, or open a Node
+# inspector (--inspect / SIGUSR1), and only loads the app from app.asar.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+# afterSign: scripts/notarize.js
+win:
+  executableName: ____PLACEHOLDER____
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+mac:
+  entitlementsInherit: build/entitlements.mac.plist
+  # Uncomment selectively for your application's purposes
+  # extendInfo:
+  # - NSCameraUsageDescription: Application requests access to the device's camera.
+  # - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+  # - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+  # - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: false
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}
+linux:
+  # .deb only (WP10 E2): its postinst configures chrome-sandbox and, on Ubuntu
+  # 24.04+, an AppArmor profile for this app, so Chromium's sandbox works
+  # without --no-sandbox. AppImage is not built: its launcher falls back to
+  # --no-sandbox where unprivileged user namespaces are restricted.
+  target:
+    - deb
+  maintainer: holochain-moq
+  category: Game
+npmRebuild: false
+# publish:
+#   provider: generic
+#   url: https://example.com/auto-updates

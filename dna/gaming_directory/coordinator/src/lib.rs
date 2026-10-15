@@ -605,3 +605,27 @@ pub fn list_games(limit: u32) -> ExternResult<Vec<GameSummary>> {
     }
     Ok(out)
 }
+
+
+/// Control-plane reference lookup: a signed, agent-authored endpoint record.
+/// Read-only; no game semantics or change to the directory integrity schema.
+#[hdk_extern]
+pub fn get_endpoint_binding(hash: ActionHash) -> ExternResult<Option<SignedPresence>> {
+    Ok(fetch::<PeerEndpointEntry>(hash)?.and_then(|(author, e)| {
+        if author.to_string() != e.peer_endpoint.agent { return None; }
+        let binding_signature = e.binding_signature?;
+        Some(SignedPresence { advertisement: e.advertisement(), binding_signature })
+    }))
+}
+
+#[hdk_extern]
+pub fn get_recent_endpoint_bindings(agent: AgentPubKey) -> ExternResult<Vec<(String, SignedPresence)>> {
+    let mut out = Vec::new();
+    for link in links_newest_first(agent.clone(), LinkTypes::AgentToEndpoint)?.into_iter().take(holochain_moq_protocol::MAX_RECENT_ADS) {
+        let Some(hash) = link_target_action(&link) else { continue; };
+        if let Some(p) = get_endpoint_binding(hash.clone())? {
+            if p.advertisement.peer_endpoint.agent == agent.to_string() { out.push((hash.to_string(), p)); }
+        }
+    }
+    Ok(out)
+}

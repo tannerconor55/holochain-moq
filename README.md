@@ -34,7 +34,7 @@ for the full design and [PROTOCOL.md](PROTOCOL.md) for wire-level details.
 | Platform split | `gaming_directory` DNA (identity, presence, game registry) + `turbo_kart` DNA (lobbies, races, results), one agent across both apps | **done, tested on real in-process conductors** - `dna/gaming_directory`, `dna/turbo_kart`, `crates/turbo-kart`, `crates/turbo-kart-client`, `crates/platform`. **Not tested between machines** |
 | WP8 | Realtime membership and access control: race admission from the Turbo Kart lobby + verified presence, roster-only sessions, player tracks read only from their owner, AI only from the host | **done, targeted tests green on real iroh (direct, relay-only) and real conductors** - `crates/turbo-kart-client/src/race.rs`, two guards in `crates/mesh`. Full regression pending (a `mesh` change). **Not tested between machines** |
 | WP9 | Realtime hardening: bounded never-published requests, per-peer subscription cap, reconnect admission rate, receive-side payload/history/group limits, bounded receive buffers | **done, targeted tests green on real iroh** (floods 10x-126x, subscription and early-request floods, churn, refused connections, migration under load) - `crates/mesh-iroh/src/limits.rs`, `crates/mesh`. Full regression pending (combined WP8 + WP9) |
-| WP10 | Game bridge (Tauri-facing) | **first slice done: lobby control plane** - `crates/kart-net` (`net_init`, `lobby_create/list/get/join/leave`, typed errors and lobby events) over the existing Turbo Kart DNA, tested on two real conductors. No Tauri crate, race start or realtime state yet |
+| WP10 | Game bridge + desktop app | **Electron/Kangaroo + Rust kart-net sidecar**, separate platform/game hApps under one agent per desktop, credential-free sandboxed renderer; Tauri frozen. **E4:** 115/115 checks, ten two-agent cycles and restarts. **E5:** title-menu multiplayer browser, create/join/leave rooms, original racer roster, active/waitlist separation and bounded polling through `window.kartNet`; browser single-player retained. See [E5 UI documentation](apps/turbo-kart-desktop/E5-MULTIPLAYER-UI.md). Not yet: race start or realtime racing **E6.4:** shared WP4-clock start (one host `RaceStart`, GO within 0.3 ms between two desktops on loopback), six host-owned AI karts via WP5 `HostSession` (host-only, epoch-checked in Rust), remote kart animation, safe sidecar-crash/host-loss policy; test profiles on disk with ownership-based cleanup (`apps/turbo-kart-desktop/E64-SYNC-AI.md`). **E6.5a:** host-authoritative race progress: the host derives laps, checkpoints, standings and finish order from host-observed positions on the real track, and Rust validates each 10 Hz snapshot (host-only, bound to race/epoch/schedule, forward-only, deterministic order) and derives reliable lap/finish events; both desktops show identical standings for every common sequence and the same provisional finish order. The desktop package now bundles the pinned Three.js (`apps/turbo-kart-desktop/E65A-RACE-PROGRESS.md`). |
 | Real Internet / NAT | Any WP over real networks | **not validated** (loopback, local relay and netem only) |
 
 Phase 2.5 exists specifically because Phase 2's Holochain-side half is
@@ -1102,7 +1102,7 @@ The integrity zome changed, so the DNA hash changed: WP7 is a new network
 ## Roadmap: Gaming Hub
 
 ```text
-Gaming Hub (Tauri, future)                    one install; games added and removed independently
+Gaming Hub (desktop, future)                  one install; games added and removed independently
  ├── gaming_directory DNA (shared)            identity · presence · game registry
  ├── Turbo Kart  ── turbo_kart DNA + game     lobbies, races, results  (+ kart-net adapter)
  ├── Cubyz       ── cubyz DNA + game          worlds, permissions
@@ -1196,6 +1196,8 @@ cargo test -p holochain-moq-e2e --test boundaries                               
 | `turbo_kart` (split) | `uhC0kxPIktjvchlE2YXZt2C1hvlHBjXDUe-Y0HfQqgJSyx6OBIDhV` |
 | `gaming_directory` (registry governance, signed presence) | `uhC0kJB2euZqWW6j_x3-P76DBNTge_8iIduAsWEdar-sqQABnNTew` |
 | `turbo_kart` (shared `protocol` changed) | `uhC0k2fC0EkCErmizCHNTJMESkSZZbD5j8qS388r2wsW_I3SnSI14` |
+| `turbo_kart` (E4 capability-revocation fix) | `uhC0ksSl5OLevlflvqr4BKNAFATLCRyjxlGD0v4Bcf5ZCRKcSTwF3` |
+| `gaming_directory` (E6.5a.1 capability-revocation fix) | `uhC0krooLUR59MWx49qVax9ZciBgppVxWMnMPYk9aS1MUyuv1p1Bp` |
 
 Implemented: the two DNAs and hApps, the game registry (register, release, read, list)
 with governance (one registration per developer and id, one strictly-newer release chain
@@ -1300,3 +1302,5 @@ cargo test -p holochain-moq-host --test load -- --nocapture                     
   reliable group (the code paths exist; the mesh API cannot produce them).
 - **No real Internet / NAT / multi-machine validation.**
 
+
+WP10 E6.1 adds host-authorized immutable race setup and endpoint readiness; live multiplayer gameplay remains pending. See [E6.1](apps/turbo-kart-desktop/E61-RACE-START.md).
